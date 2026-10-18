@@ -1,0 +1,308 @@
+# ============================================================
+#  「底层视觉论文笔记」选题配置
+#  改选题方向 / 数据源 / 阈值，只需要动这个文件，不用改代码
+# ============================================================
+
+brand:
+  name: 底层视觉论文笔记
+  slogan: 只聊底层视觉，只挑值得读的那几篇
+  author: 落日气泡酒y
+  footer_note: 本文由「底层视觉论文笔记」原创整理，转载请注明出处。
+
+# ---------- 词表：命中即加分（核心 3 分 / 任务 2 分 / 外围 1 分） ----------
+core_keywords:
+  - low-level vision
+  - low level vision
+  - image restoration
+  - 底层视觉
+  - 图像复原
+  - 图像恢复
+  - 超分辨率
+  - super-resolution
+  - super resolution
+
+task_keywords:
+  - denoising
+  - 去噪
+  - dehazing
+  - 去雾
+  - deraining
+  - 去雨
+  - desnowing
+  - 去雪
+  - deblurring
+  - 去模糊
+  - inpainting
+  - 图像修复
+  - outpainting
+  - colorization
+  - 着色
+  - 上色
+  - low-light enhancement
+  - 低光照增强
+  - 暗光增强
+  - image enhancement
+  - 图像增强
+  - demoireing
+  - 去摩尔纹
+  - reflection removal
+  - 去反光
+  - 去反射
+  - shadow removal
+  - 去阴影
+  - rain drop
+  - 去水滴
+  - image compression
+  - 图像压缩
+  - video compression
+  - 视频压缩
+  - neural compression
+  - 神经压缩
+  - frame interpolation
+  - 插帧
+  - 视频超分
+  - video super-resolution
+  - HDR
+  - 图像信号处理
+  - ISP
+  - RAW
+  - 计算摄影
+  - computational photography
+  - 图像生成
+  - diffusion model
+  - 扩散模型
+  - 扩散先验
+  - transformer
+
+peripheral_keywords:
+  - restoration
+  - enhancement
+  - benchmark
+  - dataset
+  - 数据集
+  - 基准
+  - real-world
+  - 真实场景
+  - efficient
+  - 轻量化
+  - distillation
+  - 蒸馏
+  - quantization
+  - 量化
+  - mobile
+  - 端侧
+
+# 需要降权/直接淘汰的信号
+negative_keywords:
+  - 招聘
+  - 课程推荐
+  - 直播预告
+  - 抽奖
+  - 广告
+  - 会议注册
+  - 双十一
+  - 优惠券
+
+# 方向归类：用于栏目小标签与「一期不重复」的多样性控制
+categories:
+  超分辨率: [超分辨率, super-resolution, super resolution, upsampling, 图像放大, 视频超分]
+  去噪: [denoising, 去噪, noise reduction, 噪声建模]
+  去雾去雨: [dehazing, 去雾, deraining, 去雨, desnowing, 去雪]
+  低光增强: [low-light, 低光照, 暗光, 夜间增强, exposure correction]
+  图像修复: [inpainting, 图像修复, outpainting, 补全, 老照片]
+  着色: [colorization, 着色, 上色, 色彩化]
+  去模糊: [deblurring, 去模糊, motion blur, 散焦]
+  去摩尔纹: [moire, 摩尔纹]
+  去反光去阴影: [reflection removal, 去反光, 去反射, shadow removal, 去阴影, 水滴]
+  压缩与编码: [compression, 压缩, codec, 编解码, 熵编码, 码率]
+  插帧与视频复原: [frame interpolation, 插帧, video restoration, 视频复原, 时序一致性]
+  计算摄影与ISP: [isp, raw, hdr, 计算摄影, computational photography, 白平衡, 去马赛克]
+  生成式复原: [diffusion, 扩散, flow matching, 生成先验, generative prior, 大模型]
+
+# 期刊会议等级（分值直接进排序）
+venues:
+  CVPR: 10
+  ICCV: 10
+  ECCV: 10
+  NeurIPS: 10
+  ICLR: 9
+  ICML: 9
+  AAAI: 8
+  ACM MM: 8
+  SIGGRAPH: 9
+  TPAMI: 10
+  IJCV: 9
+  TIP: 8
+  TMM: 7
+  TCSVT: 7
+  KBS: 6
+  arXiv: 2
+
+# ---------- 模块 A：学术论文 ----------
+academic:
+  lowlevelcv:
+    enabled: true
+    base_url: https://lowlevelcv.com/papers-selection
+    max_pages: 3          # 每页 9 条，抓最新 3 页
+    request_interval: 1.2 # 秒，别把人家站点打挂
+  arxiv:
+    enabled: true
+    endpoint: http://export.arxiv.org/api/query
+    max_results_per_query: 25
+    # 用 arXiv 官方语法；cat + abs 组合最稳
+    queries:
+      - 'cat:cs.CV AND (abs:"super-resolution" OR abs:"image restoration")'
+      - 'cat:cs.CV AND (abs:"denoising" OR abs:"dehazing" OR abs:"low-light enhancement")'
+      - 'cat:cs.CV AND (abs:"image compression" OR abs:"colorization" OR abs:"inpainting")'
+      - 'cat:eess.IV AND abs:"restoration"'
+  paperswithcode:
+    enabled: true
+    endpoint: https://paperswithcode.com/api/v1/papers/
+    max_results: 30
+  # 筛选参数
+  filter:
+    min_score: 6.0        # 低于这个分数不进候选池
+    top_n: 3              # 一期最多 3 篇（精读 1 篇 + 速览 2 篇）
+    freshness_days: 120   # 只保留近 N 天（顶会论文可放宽）
+    require_keyword_hit: 2
+
+# ---------- 模块 B：业界进展 ----------
+industry:
+  feeds:
+    # RSSHub 自建实例可替换 rsshub.app；也可直接填任意 RSS/Atom 地址
+    # optional: true 表示「锦上添花」——挂了不算故障，只是少一路线索
+    - name: 机器之心
+      url: https://rsshub.app/jiqizhixin/daily
+      weight: 1.0
+      optional: true
+    - name: PaperWeekly
+      url: https://rsshub.app/paperweekly
+      weight: 1.0
+      optional: true
+    - name: 将门创投
+      url: https://rsshub.app/thejiangmen
+      weight: 0.9
+      optional: true
+    - name: 量子位
+      url: https://rsshub.app/qbitai
+      weight: 0.9
+      optional: true
+    - name: CVer
+      url: https://rsshub.app/wechat/cver
+      weight: 0.8
+      optional: true
+    # 官方博客：全球可访问，作为 RSS 稳定项
+    - name: OpenAI News
+      url: https://openai.com/news/rss.xml
+      weight: 0.7
+    - name: Berkeley BAIR
+      url: https://bair.berkeley.edu/blog/feed.xml
+      weight: 0.8
+    - name: Hugging Face Blog
+      url: https://huggingface.co/blog/feed.xml
+      weight: 0.7
+      optional: true
+    - name: Google Research Blog
+      url: https://research.google/blog/rss/
+      weight: 0.7
+      optional: true
+  # 开源项目动态：RSS 全挂时的兜底，也是「开源工具/算法更新」的正式选题来源
+  github:
+    enabled: true
+    queries:
+      - image restoration
+      - super resolution
+      - image denoising
+      - low light enhancement
+    min_stars: 80
+    active_days: 240       # 近 N 天有 push 才算「在维护」
+    per_query: 15
+    weight: 0.8
+    # 可选：填 GitHub token 把搜索限流从 10 次/分钟提到 30 次/分钟
+    token: ""
+  filter:
+    min_score: 4.0
+    top_n: 4
+    freshness_days: 120    # 开源项目更新慢，别按新闻的时效卡太死
+    require_keyword_hit: 1
+  # 想让模型重点关注的方向（会写进 prompt）
+  focus:
+    - 底层视觉相关的大模型 / 基础模型（如通用复原、生成式复原）
+    - 开源工具链、推理框架、数据集与评测基准
+    - 手机 / 相机 / 视频平台的影像算法落地
+    - 顶会工业界论文与竞赛成果的工程化解读
+
+# ---------- 模块 C：竞赛 ----------
+competitions:
+  kaggle:
+    enabled: true
+    # 通过 kaggle API 拉取（需要 ~/.kaggle/kaggle.json 或 KAGGLE_USERNAME/KEY）
+    search_terms:
+      - image restoration
+      - super resolution
+      - denoising
+      - image enhancement
+      - computational photography
+    max_results: 20
+  tianchi:
+    enabled: true
+    list_url: https://tianchi.aliyun.com/competition/gameList/activeList
+    api_url: https://tianchi.aliyun.com/api/competition/list
+  web_search:
+    enabled: true
+    # 用搜索引擎补 CVPR / ECCV / CCF 竞赛通知（也可换成 Serper/Bing API）
+    queries:
+      - "CVPR 2026 workshop challenge low-level vision 2026"
+      - "ECCV 2026 challenge super resolution denoising"
+      - "CCF 图像复原 竞赛 2026"
+      - "NTIRE 2026 challenge"
+  curated:
+    # 人工兜底的赛事源：稳定、可校验，避免抓到过期信息
+    - name: NTIRE 2026
+      url: https://www.cvlai.net/ntire/2026/
+      desc: CVPR Workshop 旗下的图像复原挑战赛系列，赛道覆盖超分、去噪、去模糊与真实场景复原，baseline 完整，适合作为参赛起点。
+    - name: MIPI Challenge
+      url: https://mipi-challenge.org/
+      desc: 面向移动端影像的挑战赛，赛题集中在 RAW 域去噪、去马赛克与低光增强，工程落地价值高。
+  filter:
+    min_score: 3.0
+    top_n: 4
+    # 策展源天然相关，不强制命中关键词；平台/搜索来源仍会靠评分排序
+    require_keyword_hit: 0
+    # 只保留未截止、或截止时间在未来 N 天内的赛事
+    upcoming_days: 120
+
+# ---------- 出稿与排期 ----------
+pipelines:
+  paper:
+    layout: paper        # 对应 app/render/styles.py 里的版式
+    require_figures: 1   # 至少 1 张架构图/对比图
+    max_chars: 3500
+  industry:
+    layout: industry
+    require_figures: 0
+    max_chars: 3000
+  contest:
+    layout: contest
+    require_figures: 0
+    max_chars: 2200
+
+# cron 表达式（APScheduler，默认时区 Asia/Shanghai）
+schedule:
+  paper: "30 7 * * 1,4"      # 周一、周四 07:30 发论文
+  industry: "0 8 * * 6"      # 周六 08:00 发业界
+  contest: "0 9 * * 1"       # 周一 09:00 发竞赛
+  collect: "0 3 * * *"       # 每天 03:00 预热抓取缓存
+  enabled: "true"
+
+# ---------- 视觉主题（渲染器读取，微信内联样式） ----------
+theme:
+  ink: "#1B1D22"          # 正文
+  sub: "#6B7280"          # 辅助文字
+  primary: "#2A4BD7"      # 主色（学术蓝）
+  primary_soft: "#EEF2FF" # 主色浅底
+  accent: "#00A88F"       # 辅助色（青）
+  warm: "#E8833A"         # 竞赛暖色
+  quote_bg: "#F7F8FA"
+  line: "#E6E8EE"
+  font: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif'
