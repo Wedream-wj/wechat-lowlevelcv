@@ -3,14 +3,29 @@
 venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
 
-# 环境与密钥
+# 环境与密钥（.env 含 DeepSeek Key / 微信 AppSecret，绝不入库）
 .env
+.env.local
+*.env
 
-# 运行产物
-data/*.db
+# 运行时数据（data/wx_token.json 含 access_token；llcv.db 为运行数据库）
+data/
+
+# 运行产物（成稿 HTML/MD、封面、下载的配图——克隆后可重新生成）
 out/
 
-# 系统
+# 本地补丁与备份
+*.patch
+*.patch.bak
+*.bak
+
+# 日志
+*.log
+
+# 系统 / 编辑器
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
