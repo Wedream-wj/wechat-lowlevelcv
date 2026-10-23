@@ -1,140 +1,79 @@
-"""离线生成三份排版演示稿（不联网、不调模型）。
+"""演示入口：走真实流水线（联网抓取 + 排版），生成最新样稿。
 
 用法：
-    python -m scripts.demo
+    python -m scripts.demo               # 默认生成 paper + contest 两期
+    python -m scripts.demo paper         # 只生成论文模块
+    python -m scripts.demo contest       # 只生成竞赛模块
+    python -m scripts.demo paper contest # 指定多个（可选 paper/industry/contest）
 
-产出 out/demo_{paper,industry,contest}.html，可直接用浏览器打开看效果，
-也是验证「结构化稿 → 微信内联 HTML」这条链路的最小样例。
+与正式运行（scripts/run_once.py）的区别：
+- demo=True：不写库（不记 seen 指纹、不登记文章与运行日志），可反复重跑；
+- 不推送公众号（auto_publish 一律不生效）；
+- 产物固定复制为 out/demo_{module}.html / demo_{module}_body.html /
+  demo_{module}.md，覆盖旧样稿，方便直接对比本次重构效果。
 """
 from __future__ import annotations
 
-from pathlib import Path
+import asyncio
+import shutil
+import sys
 
-from PIL import Image, ImageDraw, ImageFont
+from app.config import settings
+from app.pipeline import run_module
 
-from app.config import ROOT, settings
-from app.llm.mock import DEMO_SPECS
-from app.render import wechat
-from app.render.cover import make_cover
-from app.render.markdown import spec_to_markdown
-from app.render.preview import render_preview
-MODULE_LABEL = {"paper": "论文精读", "industry": "业界观察", "contest": "赛事速递"}
-
+VALID = ("paper", "industry", "contest")
 OUT = settings.out_dir
-ASSETS = OUT / "assets"
-DATE = "2026.10.18"
-FONT_BOLD = "C:/Windows/Fonts/msyhbd.ttc"
-FONT_REG = "C:/Windows/Fonts/msyh.ttc"
-
-INK = "#1B2A4A"
-PRIMARY = "#2A4BD7"
-TEAL = "#00A88F"
-LINE = "#C9D4E8"
 
 
-def _font(size: int, bold: bool = True):
-    for path in ([FONT_BOLD, FONT_REG] if bold else [FONT_REG, FONT_BOLD]):
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
+async def run(module: str) -> bool:
+    print(f"[demo] ===== {module} 开始 =====")
+    result = await run_module(module, demo=True)
+    stats = result.stats or {}
+
+    if not result.article:
+        print(f"[demo] {module} 失败（耗时 {stats.get('seconds', '?')}s）：")
+        for e in result.errors or [{"source": "?", "error": "未知错误"}]:
+            print(f"  - [{e.get('source') or e.get('stage')}] {e.get('error')}")
+        return False
+
+    issue_id = stats.get("issue_id", "")
+    copies = [
+        (OUT / f"preview_{issue_id}.html", OUT / f"demo_{module}.html"),
+        (OUT / f"{issue_id}.html", OUT / f"demo_{module}_body.html"),
+        (OUT / f"{issue_id}.md", OUT / f"demo_{module}.md"),
+    ]
+    copied = []
+    for src, dst in copies:
+        if src.exists():
+            shutil.copyfile(src, dst)
+            copied.append(dst)
+
+    print(
+        f"[demo] {module} 完成（期号 {issue_id}）：抓取 {stats.get('fetched', 0)} 条 / "
+        f"选用 {stats.get('selected', 0)} 条 / 配图 {stats.get('figures', 0)} 张 / "
+        f"LLM 模式 {stats.get('llm_mode', '?')} / 耗时 {stats.get('seconds', '?')}s"
+    )
+    for e in result.errors:
+        print(f"[demo]   源告警：[{e.get('source') or e.get('stage')}] {e.get('error')}")
+    for dst in copied:
+        print(f"[demo]   产物 -> {dst}")
+    return True
 
 
-def _box(draw, xy, title, sub="", fill="#FFFFFF", border=PRIMARY, title_color=INK):
-    x1, y1, x2, y2 = xy
-    draw.rounded_rectangle(xy, radius=12, fill=fill, outline=border, width=2)
-    if sub:
-        draw.text(((x1 + x2) / 2, y1 + 22), title, font=_font(21), fill=title_color, anchor="mm")
-        draw.text(((x1 + x2) / 2, y1 + 54), sub, font=_font(14, False), fill="#6B7280", anchor="mm")
-    else:
-        draw.text(((x1 + x2) / 2, (y1 + y2) / 2), title, font=_font(20), fill=title_color, anchor="mm")
+async def main() -> None:
+    args = sys.argv[1:]
+    mods = [m for m in args if m in VALID] or ["paper", "contest"]
+    bad = [m for m in args if m not in VALID]
+    if bad:
+        print(f"[demo] 忽略未知模块：{','.join(bad)}（可选：{','.join(VALID)}）")
 
+    ok = True
+    for m in mods:
+        ok = await run(m) and ok
 
-def _arrow(draw, x1, y1, x2, y2, color="#8A9BC8"):
-    draw.line([(x1, y1), (x2, y2)], fill=color, width=2)
-    if x2 >= x1:
-        draw.polygon([(x2, y2), (x2 - 9, y2 - 5), (x2 - 9, y2 + 5)], fill=color)
-
-
-def draw_architecture() -> Path:
-    """画一张示意用的架构图（演示排版中的 figure 块）。"""
-    W, H = 1200, 560
-    img = Image.new("RGB", (W, H), "#FCFDFF")
-    d = ImageDraw.Draw(img)
-
-    d.text((48, 34), "Freqformer · Overall Architecture", font=_font(22), fill=INK)
-    d.text((48, 66), "figure for layout preview", font=_font(12, False), fill="#9AA3B2")
-
-    # 输入
-    _box(d, (48, 228, 196, 332), "输入", "低质图像", fill="#F7F9FF")
-    _arrow(d, 196, 280, 244, 280)
-
-    # 频率分解
-    _box(d, (244, 214, 396, 346), "频率分解", "高频 / 低频", fill="#EEF2FF")
-    d.line([(396, 280), (430, 280)], fill="#8A9BC8", width=2)
-    d.line([(430, 160), (430, 400)], fill="#8A9BC8", width=2)
-    _arrow(d, 430, 160, 468, 160)
-    _arrow(d, 430, 400, 468, 400)
-
-    # 双分支
-    _box(d, (468, 104, 700, 216), "高频分支", "空间局部纹理", fill="#FFFFFF", border=PRIMARY)
-    _box(d, (468, 344, 700, 456), "低频分支", "尺度鲁棒色偏", fill="#FFFFFF", border=TEAL,
-         title_color="#0B5C50")
-    _arrow(d, 700, 160, 748, 160)
-    _arrow(d, 700, 400, 748, 400)
-
-    # 分支内模块
-    _box(d, (748, 116, 916, 204), "Transformer ×N", "局部窗口注意力", fill="#F5F7FF", border="#B9C6F2")
-    _box(d, (748, 356, 916, 444), "Transformer ×N", "通道 + 全局建模", fill="#F2FBF9", border="#9BDCCF")
-
-    # 融合
-    d.line([(916, 160), (944, 160)], fill="#8A9BC8", width=2)
-    d.line([(916, 400), (944, 400)], fill="#8A9BC8", width=2)
-    d.line([(944, 160), (944, 400)], fill="#8A9BC8", width=2)
-    _arrow(d, 944, 280, 968, 280)
-    _box(d, (968, 216, 1078, 344), "FCT 融合", "可学习频率合成", fill="#FFF8EC", border="#E8B06A",
-         title_color="#8A5314")
-    _arrow(d, 1078, 280, 1102, 280)
-    _box(d, (1102, 224, 1178, 336), "输出", "重建图像", fill="#F0FAF6", border=TEAL,
-         title_color="#0B5C50")
-
-    # 图例
-    d.line([(48, 486), (1152, 486)], fill="#EDF0F7", width=1)
-    d.text((48, 504), "SA-CA：空间感知通道注意力，用于抑制摩尔纹敏感区域的冗余响应",
-           font=_font(13, False), fill="#8A90A0")
-
-    path = ASSETS / "demo_arch.png"
-    img.save(path, quality=95)
-    return path
-
-
-def main() -> None:
-    ASSETS.mkdir(parents=True, exist_ok=True)
-    arch = draw_architecture()
-
-    for module, spec in DEMO_SPECS.items():
-        cover_path = make_cover(spec, module, DATE, ASSETS / f"demo_cover_{module}.png")
-        figures = {}
-        if module == "paper":
-            figures["F1"] = {
-                "path": "assets/demo_arch.png",
-                "caption": "Freqformer 总体架构：频率分解后由双分支分别处理高频纹理与低频色偏，FCT 负责融合。",
-                "title": "Freqformer",
-            }
-        body = wechat.render_body(spec, figures, module, DATE)
-        preview = render_preview(
-            spec, body, module,
-            cover=f"assets/demo_cover_{module}.png",
-            issue_id=f"demo_{module}",
-            date_str=DATE,
-            module_label=MODULE_LABEL.get(module, module),
-        )
-        (OUT / f"demo_{module}.html").write_text(preview, encoding="utf-8")
-        (OUT / f"demo_{module}_body.html").write_text(body, encoding="utf-8")
-        (OUT / f"demo_{module}.md").write_text(spec_to_markdown(spec, figures), encoding="utf-8")
-        print(f"[demo] {module:9s} -> out/demo_{module}.html  cover={Path(cover_path).name}")
-
-    print(f"[demo] arch figure -> {arch}")
+    if not ok:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -1,7 +1,9 @@
 """生成独立的预览页：手机画框 + 一键复制到公众号后台。
 
 这个页面只用于本地预览/审稿，不会被推送到微信。
-复制按钮把文章 body 的富文本写入剪贴板，粘到公众号编辑器即可保留样式。
+复制按钮有两条路：
+- 复制 Markdown：公众号编辑器支持 Markdown 粘贴，粘进去即可；
+- 复制富文本/HTML：给不支持 Markdown 的编辑器兜底，内联样式会保留。
 """
 from __future__ import annotations
 
@@ -89,12 +91,15 @@ TEMPLATE = """<!DOCTYPE html>
           <div>素材</div><div>{source_count} 条</div>
         </div>
         <div class="row" style="margin-top:18px;">
-          <button class="primary" onclick="copyRich()">复制富文本到公众号</button>
+          <button class="primary" onclick="copyMarkdown()">复制 Markdown</button>
+          <button onclick="copyRich()">复制富文本到公众号</button>
           <button onclick="copyHtml()">复制 HTML 源码</button>
-          <button onclick="toggleSource()">查看源码</button>
+          <button onclick="toggleSource()">查看 HTML</button>
+          <button onclick="toggleMarkdown()">查看 Markdown</button>
         </div>
         <p class="hint">
-          复制后到公众号后台正文区直接粘贴，内联样式会保留。<br />
+          公众号编辑器支持 Markdown 粘贴：「复制 Markdown」后到正文区粘贴即可。<br />
+          不支持 Markdown 的编辑器用「复制富文本」，内联样式会保留。<br />
           图片需先经 <code>/api/issues/{issue_id}/push</code> 上传到微信素材库，本地预览里的图片在粘贴后需要重新上传。
         </p>
       </div>
@@ -102,11 +107,39 @@ TEMPLATE = """<!DOCTYPE html>
         <h2>HTML 源码（body）</h2>
         <pre id="source">{source_escaped}</pre>
       </div>
+      <div class="panel" style="margin-top:18px;display:none;" id="mdPanel">
+        <h2>Markdown 源码</h2>
+        <pre id="mdsource">{markdown_escaped}</pre>
+      </div>
     </div>
   </div>
 </div>
 <script>
 const BODY_HTML = {body_json};
+const MARKDOWN = {markdown_json};
+async function copyMarkdown() {{
+  try {{
+    await copyText(MARKDOWN);
+    flash("Markdown 已复制，去公众号正文区粘贴吧");
+  }} catch (e) {{
+    flash("复制失败：" + e.message + "，可点「查看 Markdown」手动全选复制");
+  }}
+}}
+async function copyText(text) {{
+  // clipboard API 只在 https / localhost 可用，双击本地文件打开时退回 execCommand
+  try {{
+    await navigator.clipboard.writeText(text);
+    return;
+  }} catch (e) {{ /* 走下面的兼容分支 */ }}
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed;left:-9999px;top:0";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(ta);
+  if (!ok) throw new Error("浏览器拒绝写入剪贴板");
+}}
 async function copyRich() {{
   try {{
     const blob = new Blob([BODY_HTML], {{type: "text/html"}});
@@ -124,10 +157,15 @@ async function copyRich() {{
   }}
 }}
 function copyHtml() {{
-  navigator.clipboard.writeText(BODY_HTML).then(() => flash("HTML 源码已复制"));
+  copyText(BODY_HTML).then(() => flash("HTML 源码已复制"))
+    .catch(e => flash("复制失败：" + e.message));
 }}
 function toggleSource() {{
   const p = document.getElementById("sourcePanel");
+  p.style.display = p.style.display === "none" ? "block" : "none";
+}}
+function toggleMarkdown() {{
+  const p = document.getElementById("mdPanel");
   p.style.display = p.style.display === "none" ? "block" : "none";
 }}
 function flash(msg) {{
@@ -143,8 +181,13 @@ function flash(msg) {{
 """
 
 
-def render_preview(spec: dict, body_html: str, module: str, cover: str, issue_id: str,
-                   date_str: str, module_label: str) -> str:
+def _js_string(text: str) -> str:
+    """把文本嵌进 <script> 的 JSON 字面量：转义 <，避免正文里的 </script> 提前闭合标签。"""
+    return json.dumps(text, ensure_ascii=False).replace("<", "\\u003c")
+
+
+def render_preview(spec: dict, body_html: str, markdown: str, module: str, cover: str,
+                   issue_id: str, date_str: str, module_label: str) -> str:
     text = "".join(str(x) for x in (spec.get("lead") or []))
     for block in spec.get("sections", []):
         text += str(block.get("text") or "")
@@ -163,5 +206,7 @@ def render_preview(spec: dict, body_html: str, module: str, cover: str, issue_id
         source_count=len(spec.get("sources") or []),
         primary="#2A4BD7",
         source_escaped=_html.escape(body_html),
-        body_json=json.dumps(body_html, ensure_ascii=False),
+        markdown_escaped=_html.escape(markdown),
+        body_json=_js_string(body_html),
+        markdown_json=_js_string(markdown),
     )

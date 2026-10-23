@@ -82,6 +82,49 @@ def _too_similar(title: str, others: Iterable[str], threshold: float = 0.86) -> 
     return False
 
 
+def filter_cfg(topics: Topics, module: str) -> dict:
+    """各模块在 topics.yaml 里的筛选参数（select 与漏斗统计共用同一份口径）。"""
+    if module == "paper":
+        return topics.raw.get("academic", {}).get("filter", {})
+    if module == "industry":
+        return topics.raw.get("industry", {}).get("filter", {})
+    return topics.raw.get("competitions", {}).get("filter", {})
+
+
+def funnel_stats(
+    items: Iterable[Item],
+    topics: Topics,
+    module: str,
+    seen: set[str] | None = None,
+) -> dict:
+    """复算一次 select 的四层过滤漏斗，给出每层各挡掉多少条。
+
+    select 结果为空时，运营需要知道是「分数不够」「关键词没命中」还是「全被去重」，
+    而不是一个笼统的失败。口径与 select 完全一致（不含相似度/多样性层，那两层只在
+    有通过者时才生效）。
+    """
+    cfg = filter_cfg(topics, module)
+    min_score = float(cfg.get("min_score", 0.0))
+    freshness_days = cfg.get("freshness_days", 45)
+    require_keyword_hit = int(cfg.get("require_keyword_hit", 1))
+    seen = seen or set()
+
+    stats = {"total": 0, "seen": 0, "score": 0, "keywords": 0, "freshness": 0, "pass": 0}
+    for item in items:
+        stats["total"] += 1
+        if item.fingerprint in seen:
+            stats["seen"] += 1
+        elif item.score < min_score:
+            stats["score"] += 1
+        elif len(item.keywords) < require_keyword_hit:
+            stats["keywords"] += 1
+        elif freshness_days and not is_fresh(item, freshness_days):
+            stats["freshness"] += 1
+        else:
+            stats["pass"] += 1
+    return stats
+
+
 def select(
     items: Iterable[Item],
     topics: Topics,
@@ -95,12 +138,7 @@ def select(
 ) -> list[Item]:
     """规则筛选 + 多样性挑选。"""
     cfg = topics.pipelines.get(module, {})
-    if module == "paper":
-        default = topics.raw.get("academic", {}).get("filter", {})
-    elif module == "industry":
-        default = topics.raw.get("industry", {}).get("filter", {})
-    else:
-        default = topics.raw.get("competitions", {}).get("filter", {})
+    default = filter_cfg(topics, module)
 
     min_score = default.get("min_score", 0.0) if min_score is None else min_score
     top_n = default.get("top_n", 3) if top_n is None else top_n

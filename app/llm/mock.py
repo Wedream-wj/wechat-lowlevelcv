@@ -7,8 +7,10 @@
 """
 from __future__ import annotations
 
+import re
 from datetime import date
 
+from ..config import topics
 from ..models import Item
 
 
@@ -25,6 +27,119 @@ def _brief(items: list[Item]) -> list[dict]:
     return out
 
 
+# 指标表里「本文方法」行的识别（与 arxiv.extract_tables 的判定保持一致）
+_OURS_ROW = re.compile(r"^(ours|proposed|本文)", re.I)
+# 转置表：方法名在表头列（首列是指标名）时的 Ours 列识别
+_OURS_COL = re.compile(r"(ours|proposed|本文)", re.I)
+# 「越低越好」的指标列：注意 (?![a-z-]) 挡住 MS-SSIM 里的 ms-，避免方向判反
+_LOWER_BETTER = re.compile(
+    r"(?<![a-z0-9])(?:ms|lpips|params?|flops?|latency|mae|rmse|memory|bpp|niqe|error|rate)(?![a-z-])",
+    re.I,
+)
+
+
+def _cell_num(value: str) -> float | None:
+    """把表格单元格里的数字抠出来（兼容「32.1±0.02」），抠不出返回 None。"""
+    try:
+        return float(re.sub(r"[^\d.\-]", "", str(value).split("±")[0]))
+    except ValueError:
+        return None
+
+
+def _verdict(gap: float) -> str:
+    if gap > 0:
+        return f"领先 {abs(gap):g}"
+    if gap < 0:
+        return f"落后 {abs(gap):g}"
+    return "持平"
+
+
+def _sota_gap_text(table: dict | None) -> str:
+    """从指标表里找 Ours/Proposed，和对比方法的最优值算差值，生成一段对比结论。
+
+    兼容两种表型：常规表（首列=方法名，Ours 在某一行）与转置表（首列=指标
+    名、Ours 在表头某一列，指标名里的 ↑/↓ 箭头直接决定方向）。没有表、或
+    表里找不到 Ours 时返回克制的降级文案——自动模式不编数字。
+    """
+    fallback = (
+        "自动模式下暂不展开逐项对比。建议核对论文实验章节：与最强基线的指标差值、"
+        "参数量与推理开销是否可接受、以及在真实退化数据上是否仍然占优。"
+    )
+    if not table:
+        return fallback
+    header = [str(h) for h in (table.get("header") or [])]
+    rows = [[str(c) for c in r] for r in (table.get("rows") or [])]
+    lines: list[str] = []
+
+    # 常规表：Ours 在某一行，逐列和对手行的最优值比
+    ours_row = next((r for r in rows if r and _OURS_ROW.match(r[0])), None)
+    if ours_row is not None and len(header) >= 2:
+        for ci in range(1, min(len(header), len(ours_row))):
+            col = header[ci].strip()
+            if not col or len(col) > 14:
+                continue
+            ours_v = _cell_num(ours_row[ci])
+            if ours_v is None:
+                continue
+            rivals = []
+            for r in rows:
+                if r is ours_row or not r or _OURS_ROW.match(r[0]) or ci >= len(r):
+                    continue
+                v = _cell_num(r[ci])
+                if v is not None:
+                    rivals.append(v)
+            if not rivals:
+                continue
+            lower_better = bool(_LOWER_BETTER.search(col))
+            best = min(rivals) if lower_better else max(rivals)
+            gap = (best - ours_v) if lower_better else (ours_v - best)
+            direction = "越低越好" if lower_better else "越高越好"
+            lines.append(f"{col} 上 Ours 为 {ours_v:g}、对比方法最优 {best:g}（{direction}，{_verdict(gap)}）")
+    else:
+        # 转置表：Ours 在表头列，逐行（每行一个指标）和对手列的最优值比
+        ours_ci = next((ci for ci, h in enumerate(header) if _OURS_COL.search(h)), None)
+        if ours_ci is None:
+            return fallback
+        for r in rows:
+            if not r or ours_ci >= len(r):
+                continue
+            raw_metric = r[0]
+            metric = raw_metric.replace("↑", "").replace("↓", "").strip()
+            if not metric or len(metric) > 18:
+                continue
+            ours_v = _cell_num(r[ours_ci])
+            if ours_v is None:
+                continue
+            rivals = []
+            for ci in range(1, len(r)):
+                if ci == ours_ci:
+                    continue
+                v = _cell_num(r[ci])
+                if v is not None:
+                    rivals.append(v)
+            if not rivals:
+                continue
+            if "↓" in raw_metric:
+                lower_better = True
+            elif "↑" in raw_metric:
+                lower_better = False
+            else:
+                lower_better = bool(_LOWER_BETTER.search(metric))
+            best = min(rivals) if lower_better else max(rivals)
+            gap = (best - ours_v) if lower_better else (ours_v - best)
+            direction = "越低越好" if lower_better else "越高越好"
+            lines.append(f"{metric} 上 Ours 为 {ours_v:g}、对比方法最优 {best:g}（{direction}，{_verdict(gap)}）")
+
+    if len(lines) > 4:
+        lines = lines[:4]
+    if not lines:
+        return "表格已列出逐项对比；自动模式下建议重点看 Ours 与最强对手的差值是否稳定。"
+    return (
+        "；".join(lines)
+        + "。值得注意的是，以上是表格数字的直接换算，参数量与推理开销请结合原文核对。"
+    )
+
+
 def mock_spec(module: str, items: list[Item], figures: dict[str, dict]) -> dict:
     """把素材机械地组织成 ArticleSpec，不生成任何素材之外的数字。"""
     if not items:
@@ -35,6 +150,18 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict]) -> dict:
     if module == "paper":
         raw_title = main.extra.get("title_zh") or main.title
         short_title = raw_title if len(raw_title) <= 26 else raw_title[:26].rstrip("，、的与和及 ") + "…"
+        abstract = main.summary or "摘要暂缺。"
+        # 中文摘要句末标点后没有空白，旧正则要求标点后跟 \s+ 会把整篇摘要切成
+        # 单句。这里中文句号/问叹号做零宽切分；英文句末标点仍要求后跟空白，
+        # 这样 "2512.16357"、"0.5" 这类小数点不会误切。
+        sentences = [s.strip() for s in
+                     re.split(r"(?<=[。！？])|(?<=[.!?])\s+", abstract) if s.strip()]
+        tables = main.extra.get("tables") or []
+        # build_figures 按素材内图片顺序编号：第 1 张 = 架构图，第 2 张 = 实验结果图
+        fids = [fid for fid, meta in figures.items()
+                if meta.get("item_id") == f"{main.module}:{main.fingerprint}"]
+        arch_fid, res_fid = (fids + ["", ""])[:2]
+
         sections: list[dict] = [
             {"type": "meta_card", "rows": [
                 ["论文标题", main.extra.get("title_zh") or main.title],
@@ -42,30 +169,60 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict]) -> dict:
                 ["作者团队", ", ".join(main.authors[:6]) or "未披露"],
                 ["开源代码", main.code_url or "暂未开源"],
             ]},
-            {"type": "h2", "text": "01 | 这篇在解决什么问题"},
-            {"type": "p", "text": (main.summary or "摘要暂缺。")[:600]},
-            {"type": "h2", "text": "02 | 方法拆解"},
-            {"type": "p", "text": "以下内容依据论文摘要自动整理，完整的方法细节需要结合原文阅读。"},
+            {"type": "h2", "text": "01 | 研究背景与痛点"},
+            {"type": "p", "text": (" ".join(sentences[:2]) or abstract)[:600]},
+            {"type": "h2", "text": "02 | 核心创新与方法拆解"},
         ]
-        fids = [fid for fid, meta in figures.items() if meta.get("item_id") == f"{main.module}:{main.fingerprint}"]
-        if fids:
-            sections.append({"type": "figure", "ref": fids[0],
-                             "caption": figures[fids[0]].get("caption") or "论文总体框架"})
+        if arch_fid:
+            sections.append({"type": "figure", "ref": arch_fid,
+                             "caption": figures[arch_fid].get("caption") or "图 1：论文总体架构。"})
+        method = [s for s in sentences
+                  if re.search(r"(we propose|we present|we introduce|we design|we develop|"
+                               r"novel|our method|本文提出|本文设计|提出|设计|框架|模块)", s, re.I)][:2]
+        if not method and len(sentences) > 2:
+            # 摘要没明说方法时取中段两句兜底，保证 02 段不空
+            method = sentences[2:4]
+        if method:
+            sections.append({"type": "p", "text": " ".join(method)})
+        if main.keywords:
+            sections.append({"type": "p",
+                             "text": f"涉及关键词：{'、'.join(main.keywords[:5])} 等，方法细节以原文为准。"})
+        sections.append({"type": "h2", "text": "03 | 关键实验结果解读"})
+        numeric = [s for s in sentences
+                   if re.search(r"\d+(?:\.\d+)?\s*(dB|%|×|x|ms|倍)|\d+\.\d+", s)][:2]
+        if numeric:
+            sections.append({"type": "p", "text": " ".join(numeric)})
+        elif tables or res_fid:
+            # 摘要没披露量化数字，但表格/结果图在——明说数字在下面，不编造
+            sections.append({"type": "p", "text": "量化结论见下方表格与结果图，数字均摘自论文原文。"})
+        else:
+            sections.append({"type": "p",
+                             "text": "摘要未披露量化指标；建议直接核对原文实验章节的主表，"
+                                     "确认与最强基线的差值以及推理开销。"})
+        if tables:
+            t = tables[0]
+            sections.append({"type": "table", "header": t.get("header") or [],
+                             "rows": t.get("rows") or []})
+            sections.append({"type": "p",
+                             "text": f"上表摘自论文：{(t.get('caption') or '核心指标对比').rstrip('.。')}。"})
+        if res_fid:
+            sections.append({"type": "figure", "ref": res_fid,
+                             "caption": figures[res_fid].get("caption") or "图 2：实验结果对比。"})
         sections += [
-            {"type": "h2", "text": "03 | 代价与适用边界"},
-            {"type": "p", "text": "自动模式下暂不做主观评价。建议重点关注：参数量与推理开销、真实场景泛化、以及对训练数据规模的依赖。"},
+            {"type": "h2", "text": "04 | 与 SOTA 的对比与代价"},
+            {"type": "p", "text": _sota_gap_text(tables[0] if tables else None)},
         ]
         if len(items) > 1:
-            sections += [{"type": "h2", "text": "04 | 顺带值得一看"},
+            sections += [{"type": "h2", "text": "05 | 顺带值得一看"},
                          {"type": "bullets", "items": [f"{i.title}（{i.venue or 'arXiv'}）" for i in items[1:3]]}]
         return {
             "title": f"{short_title}｜论文速览",
             "subtitle": f"{main.venue or 'arXiv'} · {main.category or '底层视觉'}",
             "digest": (main.summary or "")[:100],
             "lead": [f"今天看一篇 {main.venue or 'arXiv'} 的工作：{main.title}。",
-                     "以下为结构化速览，配置大模型后可生成完整解读。"],
+                     "以下为结构化速览（背景 / 方法 / 实验 / SOTA 对比），配置大模型后可生成完整解读。"],
             "sections": sections,
-            "takeaway": "先读摘要与架构图，再决定是否精读实验部分。",
+            "takeaway": "先读架构图与指标表，再决定是否精读实验部分。",
             "sources": [{"name": main.title, "url": main.url}],
         }
 
@@ -93,30 +250,85 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict]) -> dict:
             "sources": [{"name": i.title, "url": i.url} for i in items[:4]],
         }
 
+    def _fmt_deadline(item: Item) -> str:
+        """deadline 统一成「YYYY-MM-DD（剩 N 天）」的展示格式。"""
+        raw = str(item.extra.get("deadline") or "")
+        m = re.search(r"\d{4}-\d{1,2}-\d{1,2}", raw)
+        if not m:
+            return raw or "待官方公布"
+        days = item.extra.get("days_left")
+        if isinstance(days, int) and days >= 0:
+            return f"{m.group(0)}（剩 {days} 天）"
+        return m.group(0)
+
+    def _desc(text: str, limit: int = 200) -> str:
+        """卡片简介按句界截断：固定字符数硬切会把句子拦腰斩断，读者看到半句话。"""
+        text = re.sub(r"\s+", " ", (text or "").strip())
+        if len(text) <= limit:
+            return text
+        cut = text[:limit]
+        pos = max(cut.rfind("。"), cut.rfind("！"), cut.rfind("？"))
+        if pos >= 40:
+            return cut[:pos + 1]
+        # 前段没有句末标点就退到逗号边界，断口补省略号示意有后文
+        pos = max(cut.rfind("，"), cut.rfind("、"), cut.rfind(" "))
+        return cut[:pos].rstrip() + "…" if pos >= 40 else cut.rstrip() + "…"
+
+    pool = items[:4]
+    # 底层视觉类目命中数：全部命中才用「底层视觉赛事」措辞；零命中说明本期在办
+    # 的都是相邻方向，标题与导语要如实说，不能硬贴栏目标签
+    cv_labels = set(topics.categories) | {"底层视觉"}
+    cv_n = sum(1 for i in pool if (i.category or "") in cv_labels)
     cards: list[dict] = []
-    for item in items[:3]:
+    for item in pool:
         cards += [
             {"type": "contest_card",
              "name": item.title,
-             "track": item.category or "底层视觉",
+             "track": item.category or "综合赛事",
              "prize": str(item.extra.get("prize") or "待官方公布"),
-             "deadline": str(item.extra.get("deadline") or "待官方公布"),
+             "deadline": _fmt_deadline(item),
              "entry": item.url,
-             "desc": (item.summary or "")[:120]},
+             "desc": _desc(item.summary)},
             {"type": "divider"},
         ]
+    if cards:
+        cards.pop()
+    sections: list[dict] = [{"type": "h2", "text": "01 | 本期值得关注的赛事"}]
+    sections += cards
+    sections += [
+        {"type": "h2", "text": "02 | 时间线与怎么选"},
+        {"type": "table", "header": ["赛事", "方向", "截止", "奖金"],
+         "rows": [[i.title[:40], i.category or "综合赛事", _fmt_deadline(i),
+                   str(i.extra.get("prize") or "待官方公布")] for i in pool]},
+        {"type": "bullets", "items": [
+            "先看截止倒计时：剩不足两周的赛事，只做增量改进更稳，别押注从头训的方案",
+            "同一方向只报一场：相近赛题共享技巧，集中精力才有产出",
+            "奖金与参赛队伍数一起看：队伍数远超奖金梯度的赛事，性价比要打折",
+        ]},
+        {"type": "h2", "text": "03 | 参赛避坑"},
+        {"type": "bullets", "items": ["先确认评测指标与提交格式，再设计模型", "注意训练集与测试集的分布差异", "预留至少 30% 时间做复现与集成"]},
+    ]
+    if cv_n == len(pool):
+        title = f"本期值得打的底层视觉赛事：{len(pool)} 场进行中"
+        digest = "自动汇总仍在进行 / 即将开始的底层视觉赛事，含赛题方向、奖金与截止倒计时。"
+        lead0 = f"本期汇总 {len(pool)} 场与底层视觉相关的赛事，已自动过滤过期与报名截止的场次。"
+    elif cv_n > 0:
+        title = f"本期值得打的赛事：{cv_n} 场底层视觉 + {len(pool) - cv_n} 场相邻方向"
+        digest = "自动汇总仍在进行 / 即将开始的赛事，含赛题方向、奖金与截止倒计时。"
+        lead0 = f"本期汇总 {len(pool)} 场赛事，其中 {cv_n} 场与底层视觉直接相关，已自动过滤过期与报名截止的场次。"
+    else:
+        title = f"本期暂无纯底层视觉赛事在办，先看 {len(pool)} 场相邻方向"
+        digest = "自动汇总仍在进行 / 即将开始的赛事，含赛题方向、奖金与截止倒计时。"
+        lead0 = "本期没有检索到仍在报名的纯底层视觉赛事，先整理几场相邻方向的 AI 赛事，已自动过滤过期与报名截止的场次。"
     return {
-        "title": "本期值得打的底层视觉赛事",
-        "subtitle": "按方向、奖金与截止时间整理",
-        "digest": "自动汇总的赛事清单，含赛题方向、奖金与截止时间。",
-        "lead": [f"本期汇总 {len(items[:3])} 场与底层视觉相关的赛事。",
+        "title": title,
+        "subtitle": "已过滤过期赛事，按截止时间与奖金整理",
+        "digest": digest,
+        "lead": [lead0,
                  "时间与奖金以官方页面为准，建议先跑通 baseline 再决定投入。"],
-        "sections": cards + [
-            {"type": "h2", "text": "01 | 参赛避坑"},
-            {"type": "bullets", "items": ["先确认评测指标与提交格式，再设计模型", "注意训练集与测试集的分布差异", "预留至少 30% 时间做复现与集成"]},
-        ],
+        "sections": sections,
         "takeaway": "选一场与手头数据最接近的赛事，胜率比奖金更重要。",
-        "sources": [{"name": i.title, "url": i.url} for i in items[:3]],
+        "sources": [{"name": i.title, "url": i.url} for i in pool],
     }
 
 

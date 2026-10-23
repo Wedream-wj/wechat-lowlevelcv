@@ -11,13 +11,15 @@ import asyncio
 import hashlib
 import mimetypes
 import re
+import ssl
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from ..config import settings
+from ..config import settings, topics
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -28,6 +30,19 @@ MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 class SourceError(RuntimeError):
     """单个数据源失败，不影响其它源。"""
+
+
+def _ssl_verify() -> "ssl.SSLContext | bool":
+    """TLS 校验策略。
+
+    默认走 httpx 内置 CA（certifi）。公司内网代理常对 HTTPS 做证书替换（MITM），
+    会导致 arxiv.org 等站点报 CERTIFICATE_VERIFY_FAILED——这类机器的系统证书
+    存储里通常已装了企业根证书，配置 network.trust_system_certs: true 即可信任
+    系统存储（等价于浏览器行为），公网部署保持 false 不降低安全性。
+    """
+    if topics.raw.get("network", {}).get("trust_system_certs", False):
+        return ssl.create_default_context()
+    return True
 
 
 class HttpClient:
@@ -42,6 +57,7 @@ class HttpClient:
             timeout=httpx.Timeout(20.0, connect=8.0),
             follow_redirects=True,
             http2=False,
+            verify=_ssl_verify(),
         )
 
     async def __aenter__(self) -> "HttpClient":
@@ -130,13 +146,14 @@ def strip_html(text: str, limit: int = 1200) -> str:
 
 
 def abs_url(base: str, href: str) -> str:
+    """按浏览器规则（RFC 3986）把相对链接解析成绝对地址。
+
+    必须用标准库 urljoin 而不是手工拼接：arXiv HTML 版的 img src 是无前导
+    斜杠的相对路径（如 "2512.16357v3/fw1.png"，页面在 .../html/2512.16357v3），
+    浏览器语义是替换 base 的最后一段得到 .../html/2512.16357v3/fw1.png，
+    手拼 base + "/" + href 会把目录翻倍成 .../2512.16357v3/2512.16357v3/fw1.png，
+    404 后图片静默丢失。urljoin 对 //、/、绝对 http 链接的行为也全部正确。
+    """
     if not href:
         return ""
-    if href.startswith("//"):
-        return "https:" + href
-    if href.startswith("http"):
-        return href
-    if href.startswith("/"):
-        m = re.match(r"^(https?://[^/]+)", base)
-        return (m.group(1) if m else base.rstrip("/")) + href
-    return base.rstrip("/") + "/" + href.lstrip("/")
+    return urljoin(base, href)

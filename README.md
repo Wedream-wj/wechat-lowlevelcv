@@ -85,6 +85,7 @@ python -m scripts.check_sources
 见 `.env.example`。要点：
 
 - `LLM_API_KEY / LLM_BASE_URL / LLM_MODEL`：任意 OpenAI 兼容端点；
+- `LLM_REASONING_EFFORT`：推理模型（DeepSeek-R1/V4 等）建议设 `none` 关思考——思维链与正文共享 `max_tokens`，不关会出现「模型返回为空 / JSON 被截断 / 单篇数分钟」；留空则不下发该参数，非推理模型无需设置；
 - `WX_APPID / WX_SECRET`：公众号后台「基本配置」获取；**需把服务器出口 IP 加白名单**，且账号需有草稿箱权限（认证订阅号/服务号）；
 - `KAGGLE_USERNAME / KAGGLE_KEY`、`SERPER_API_KEY / TAVILY_API_KEY`：竞赛模块的可选增强源，不配则自动跳过；
 - `LLCV_ADMIN_TOKEN`：设置后，触发出稿/推送的接口要求 `X-Admin-Token` 头。
@@ -118,7 +119,7 @@ wechat-lowlevelcv/
 │   ├── render/
 │   │   ├── wechat.py        # ★ ArticleSpec → 微信内联样式 HTML
 │   │   ├── markdown.py      # ArticleSpec → Markdown（可编辑中间稿）
-│   │   ├── preview.py       # 手机画框预览页（一键复制富文本）
+│   │   ├── preview.py       # 手机画框预览页（一键复制 Markdown / 富文本）
 │   │   └── cover.py         # 1200×675 封面生成
 │   └── publish/wechat_api.py# token 缓存 / uploadimg / add_material / draft/add
 ├── config/topics.yaml       # ★ 选题词表、数据源、阈值、排期、主题色——改这里不改代码
@@ -171,7 +172,7 @@ wechat-lowlevelcv/
 - 全部样式内联（公众号过滤 `<style>` 与 class）；布局用 `section/p/table`，不用 flex/grid；
 - 主色随模块切换（学术蓝 / 青色 / 暖橙），小节编号胶囊、引用块、高亮卡、论文信息卡、赛事卡、深色「写在最后」总结卡；
 - 图片 `width:100%` 自适应；表格用 `table-layout:fixed` + 斑马纹；
-- 预览页带「复制富文本」按钮（Clipboard API + execCommand 兜底），粘贴进公众号编辑器即保留样式；
+- 预览页两个复制入口（Clipboard API + execCommand 兜底）：**「复制 Markdown」**（首选——公众号编辑器支持 Markdown 粘贴，另带「查看 Markdown」面板可手动全选复制）与「复制富文本」；后者粘贴进公众号编辑器即保留内联样式，公众号不认 Markdown 时用它兜底；
 - 推草稿时本地图片自动走 `media/uploadimg` 换成微信 CDN URL（同一张图只传一次）。
 
 ## 7. API 一览
@@ -185,6 +186,7 @@ wechat-lowlevelcv/
 | GET | `/api/jobs/{id}` | 任务进度 |
 | GET | `/api/issues` · `/api/issues/{id}` | 成稿列表 / 详情 |
 | GET | `/preview/{issue_id}` | 手机画框预览 |
+| GET | `/markdown/{issue_id}` | 该期 Markdown 原文（`text/markdown`，可直接复制/另存） |
 | POST | `/api/issues/{id}/push` | 推公众号草稿箱 |
 | GET | `/api/prompts/{module}` | 查看完整 Prompt |
 | GET | `/api/sources` · `/api/orphans` | 数据源清单 / 未消耗素材 |
@@ -211,4 +213,4 @@ python -m unittest discover -s tests -v
 - 公众号 RSS 依赖 RSSHub 可用性，建议自建实例；公共实例挂了会自动落到 GitHub 开源源，但「公众号原文」这一路就缺了；
 - GitHub 搜索接口未鉴权时限流 10 次/分钟，代码已按 6.5 秒间隔串行；填 `industry.github.token` 可提速到 30 次/分钟；
 - 本机实测（2026-10 网络环境）：`openai.com/news/rss.xml`、`bair.berkeley.edu`、`api.github.com` 可访问；`jiqizhixin.com`、`huggingface.co`、`research.google` 及 RSSHub 公共实例被代理拦截（502）。这类地域性差异应通过 `/api/sources` 的体检结果确认，不要凭代码假设；
-- 草稿箱接口要求认证订阅号/服务号；未认证账号请用「复制富文本」手动粘贴。
+- 草稿箱接口要求认证订阅号/服务号；未认证账号请用预览页的「复制 Markdown」或「复制富文本」手动粘贴。

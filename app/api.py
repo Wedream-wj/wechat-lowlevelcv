@@ -4,6 +4,7 @@
 - POST /api/run/{module}   触发一期（后台任务，返回 job_id）
 - GET  /api/jobs/{job_id}  轮询进度
 - GET  /preview/{issue_id} 手机画框预览
+- GET  /markdown/{issue_id} 该期 Markdown 原文（text/markdown，便于直接复制/另存）
 - POST /api/issues/{id}/push 推草稿箱
 """
 from __future__ import annotations
@@ -16,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import db
@@ -112,21 +113,45 @@ async def prompt(module: str) -> dict:
 
 
 async def _run_job(job_id: str, module: str, publish: bool | None, top_n: int | None) -> None:
-    JOBS[job_id].update({"status": "running", "started_at": datetime.now().isoformat()})
+    job = JOBS[job_id]
+    job.update({"status": "running", "started_at": datetime.now().isoformat()})
+    # 进度与里程碑事件由 run_module 的回调实时写入，前端每 1.5s 轮询展示
+    job["progress"] = {"stage": "启动", "pct": 1, "msg": "任务已启动"}
+    job["events"] = []
+
+    def on_progress(stage: str, pct: int, msg: str, event: bool = False) -> None:
+        job["progress"] = {"stage": stage, "pct": int(pct), "msg": msg}
+        if event:
+            job["events"].append({
+                "t": datetime.now().strftime("%H:%M:%S"),
+                "stage": stage,
+                "msg": msg,
+            })
+            # 事件只留最近 200 条，防止超长任务把内存拖爆
+            if len(job["events"]) > 200:
+                del job["events"][: len(job["events"]) - 200]
+
     try:
-        result = await run_module(module, publish=publish, top_n=top_n)
+        result = await run_module(module, publish=publish, top_n=top_n, progress=on_progress)
         if result.article:
-            JOBS[job_id].update({
+            job.update({
                 "status": "done",
                 "issue_id": result.article.issue_id,
                 "title": result.article.title,
                 "stats": result.stats,
                 "errors": result.errors,
             })
+            job["progress"] = {"stage": "完成", "pct": 100,
+                               "msg": f"已生成：{result.article.title}"}
         else:
-            JOBS[job_id].update({"status": "failed", "errors": result.errors, "stats": result.stats})
+            fatal = result.errors[-1] if result.errors else {"stage": "?", "error": "未知错误"}
+            job.update({"status": "failed", "errors": result.errors, "stats": result.stats})
+            job["progress"] = {"stage": "失败",
+                               "pct": job["progress"].get("pct", 0),
+                               "msg": f"{fatal.get('stage')}：{fatal.get('error')}"}
     except Exception as exc:  # 兜底，避免任务静默消失
-        JOBS[job_id].update({"status": "failed", "errors": [{"stage": "runner", "error": str(exc)}]})
+        job.update({"status": "failed", "errors": [{"stage": "runner", "error": str(exc)}]})
+        job["progress"] = {"stage": "失败", "pct": job["progress"].get("pct", 0), "msg": str(exc)}
 
 
 @app.post("/api/run/{module}")
@@ -175,7 +200,26 @@ async def preview(issue_id: str) -> HTMLResponse:
     path = settings.out_dir / f"preview_{issue_id}.html"
     if not path.exists():
         raise HTTPException(404, "预览不存在，请先生成")
-    return HTMLResponse(path.read_text(encoding="utf-8"))
+    html = path.read_text(encoding="utf-8")
+    # 预览页里的图片是文件系统相对路径（assets/xxx.png），直接经 HTTP 返回时会被
+    # 解析成 /preview/assets/xxx.png 而 404。这里只在响应时注入 <base href="/out/">
+    # 把相对资源锚定到静态目录 /out 上；磁盘上的 preview_*.html 保持原样，
+    # 以便运维直接双击打开时仍是同目录相对路径，两种打开方式互不干扰。
+    if "<base " not in html:
+        html = html.replace("<head>", '<head>\n<base href="/out/">', 1)
+    return HTMLResponse(html)
+
+
+@app.get("/markdown/{issue_id}")
+async def markdown(issue_id: str) -> Response:
+    """返回该期 Markdown 原文，控制台「复制 Markdown」和浏览器另存都走这里。"""
+    # 期号来自 URL，只接受纯文件名，挡住 ..\ 与 ../ 之类的目录穿越
+    if Path(issue_id).name != issue_id:
+        raise HTTPException(404, "期号不合法")
+    path = settings.out_dir / f"{issue_id}.md"
+    if not path.exists():
+        raise HTTPException(404, "Markdown 不存在，请先生成")
+    return Response(path.read_text(encoding="utf-8"), media_type="text/markdown; charset=utf-8")
 
 
 @app.post("/api/issues/{issue_id}/push")
@@ -186,6 +230,15 @@ async def push(issue_id: str, request: Request) -> dict:
     except PipelineError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "issue_id": article.issue_id, "media_id": article.wx_media_id, "status": article.status}
+
+
+@app.get("/api/wechat/check")
+async def wechat_check() -> dict:
+    """微信连接体检：验证配置 → 凭据/白名单 → 草稿箱权限，不产生任何草稿。"""
+    from .publish.wechat_api import WeChatClient
+
+    async with WeChatClient() as wx:
+        return await wx.diagnose()
 
 
 @app.get("/api/orphans")

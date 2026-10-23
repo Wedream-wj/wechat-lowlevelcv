@@ -104,6 +104,13 @@ class Settings:
     llm_temperature: float = field(default_factory=lambda: float(_env("LLM_TEMPERATURE", "0.6")))
     llm_max_tokens: int = field(default_factory=lambda: int(_env("LLM_MAX_TOKENS", "8000")))
     llm_timeout: int = field(default_factory=lambda: int(_env("LLM_TIMEOUT", "180")))
+    # 推理模型的思考强度（none/low/medium/high）。留空则不下发该参数，对不认这个
+    # 字段的 OpenAI 兼容端点零影响；推理模型的思维链与正文共享 max_tokens，设 none
+    # 可避免正文被思考挤空、JSON 被截断（实测同一篇论文 505s → 59s）。
+    llm_reasoning_effort: str = field(default_factory=lambda: _env("LLM_REASONING_EFFORT", ""))
+    # 是否让 LLM 请求遵循系统/环境的上网代理设置。内网网关（如 http://ai-sssc.…）
+    # 会被公司代理劫持成拦截页，需在 .env 设 LLM_TRUST_ENV=0 直连；公网端点保持默认 1。
+    llm_trust_env: bool = field(default_factory=lambda: _env_bool("LLM_TRUST_ENV", True))
 
     # 微信公众号
     wx_appid: str = field(default_factory=lambda: _env("WX_APPID"))

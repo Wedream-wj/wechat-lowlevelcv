@@ -28,6 +28,36 @@ class WeChatError(RuntimeError):
         self.errcode = errcode
 
 
+# 常见 errcode → 可操作建议。推送失败时直接告诉用户「去哪里、点什么」。
+ERRCODE_HINTS: dict[int, str] = {
+    40164: "服务器出口 IP 不在白名单：登录 mp.weixin.qq.com → 设置与开发 → 基本配置 → "
+           "「IP白名单」→ 把报错里列出的 IP 填进去并保存（改动即时生效，无需重启本服务）。",
+    40001: "AppSecret 错误或已重置：到 mp.weixin.qq.com → 设置与开发 → 基本配置核对 "
+           "AppSecret（重置后旧密钥立即失效），注意复制时不要带空格。",
+    40125: "AppSecret 无效：同 40001，确认密钥是最新的且未被重置。",
+    41004: "缺少 AppSecret 参数：检查 .env 里 WX_SECRET 是否为空。",
+    40013: "AppID 无效：核对 .env 里 WX_APPID 是否与公众号一致。",
+    48001: "接口无权限：草稿箱接口要求「认证订阅号」或「服务号」。个人未认证订阅号没有该权限，"
+           "只能用控制台的「复制富文本」手动粘贴发布。",
+    45009: "调用频率超限：稍等几分钟再试（草稿箱每日限额较高，一般碰不到）。",
+    40007: "封面 media_id 无效：通常是封面文件格式/大小不符（需 jpg/png，<10MB），重试一次。",
+}
+
+
+def friendly_error(errcode: int | None, errmsg: str) -> str:
+    """把原始 errmsg 翻译成带操作指引的错误信息。"""
+    base = f"{errmsg}（errcode={errcode}）" if errcode else errmsg
+    hint = ERRCODE_HINTS.get(errcode or 0)
+    if not hint:
+        return base
+    # 40164 时把微信报出来的 IP 抠出来，让用户可以直接复制
+    if errcode == 40164:
+        m = re.search(r"invalid ip ([0-9a-fA-F.:]+)", errmsg)
+        if m:
+            return f"{base}｜需要加入白名单的 IP：{m.group(1)}。{hint}"
+    return f"{base}｜{hint}"
+
+
 class WeChatClient:
     def __init__(self) -> None:
         self.appid = settings.wx_appid
@@ -68,7 +98,10 @@ class WeChatClient:
         )
         data = resp.json()
         if "access_token" not in data:
-            raise WeChatError(f"获取 access_token 失败：{data}", data.get("errcode"))
+            raise WeChatError(
+                f"获取 access_token 失败：{friendly_error(data.get('errcode'), data.get('errmsg', ''))}",
+                data.get("errcode"),
+            )
         payload = {
             "appid": self.appid,
             "token": data["access_token"],
@@ -76,6 +109,35 @@ class WeChatClient:
         }
         TOKEN_CACHE.write_text(json.dumps(payload), encoding="utf-8")
         return payload["token"]
+
+    async def diagnose(self) -> dict:
+        """一键体检：不推草稿，只验证凭据 → 白名单 → 草稿箱权限，返回可展示的结果。"""
+        checks: list[dict] = []
+        ok = True
+        if not self.ready:
+            return {
+                "ok": False,
+                "checks": [{"item": "配置", "ok": False,
+                            "msg": ".env 未配置 WX_APPID / WX_SECRET"}],
+            }
+        checks.append({"item": "配置", "ok": True,
+                       "msg": f"AppID={self.appid}，Secret 已配置（{len(self.secret)} 位）"})
+        try:
+            await self.token(force=True)
+            checks.append({"item": "凭据与白名单", "ok": True,
+                           "msg": "access_token 获取成功（Secret 正确、本机 IP 已在白名单）"})
+        except WeChatError as exc:
+            ok = False
+            checks.append({"item": "凭据与白名单", "ok": False, "msg": str(exc)})
+            return {"ok": False, "checks": checks}
+        try:
+            data = await self._post("/cgi-bin/draft/count")
+            checks.append({"item": "草稿箱权限", "ok": True,
+                           "msg": f"接口可用，当前草稿 {data.get('total', '?')} 篇"})
+        except WeChatError as exc:
+            ok = False
+            checks.append({"item": "草稿箱权限", "ok": False, "msg": str(exc)})
+        return {"ok": ok, "checks": checks}
 
     async def _post(self, path: str, *, params: dict | None = None, json_body: dict | None = None,
                     files: dict | None = None, force_token: bool = False) -> dict:
@@ -95,7 +157,9 @@ class WeChatClient:
             if not force_token:
                 return await self._post(path, params=params, json_body=json_body, files=files, force_token=True)
         if errcode:
-            raise WeChatError(f"{path} 失败：{data.get('errmsg')}（errcode={errcode}）", errcode)
+            raise WeChatError(
+                f"{path} 失败：{friendly_error(errcode, data.get('errmsg', ''))}", errcode
+            )
         return data
 
     # ------------------------------------------------------------ upload

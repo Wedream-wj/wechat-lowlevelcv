@@ -138,6 +138,13 @@ venues:
   KBS: 6
   arXiv: 2
 
+# ---------- 网络抓取 ----------
+network:
+  # 公司内网代理会对部分 HTTPS 站点（arxiv.org 等）做证书替换（MITM），
+  # httpx 默认只信 certifi 会报 CERTIFICATE_VERIFY_FAILED。
+  # true = 信任系统证书存储（含企业根证书，等价浏览器行为）；公网部署改回 false。
+  trust_system_certs: true
+
 # ---------- 模块 A：学术论文 ----------
 academic:
   lowlevelcv:
@@ -147,7 +154,7 @@ academic:
     request_interval: 1.2 # 秒，别把人家站点打挂
   arxiv:
     enabled: true
-    endpoint: http://export.arxiv.org/api/query
+    endpoint: https://export.arxiv.org/api/query
     max_results_per_query: 25
     # 用 arXiv 官方语法；cat + abs 组合最稳
     queries:
@@ -156,7 +163,8 @@ academic:
       - 'cat:cs.CV AND (abs:"image compression" OR abs:"colorization" OR abs:"inpainting")'
       - 'cat:eess.IV AND abs:"restoration"'
   paperswithcode:
-    enabled: true
+    # 2026-10 实测站点持续 504/连接重置（疑似关停），先禁用，省下每次 40s 的超时等待
+    enabled: false
     endpoint: https://paperswithcode.com/api/v1/papers/
     max_results: 30
   # 筛选参数
@@ -246,24 +254,49 @@ competitions:
     max_results: 20
   tianchi:
     enabled: true
-    list_url: https://tianchi.aliyun.com/competition/gameList/activeList
-    api_url: https://tianchi.aliyun.com/api/competition/list
+    list_url: https://tianchi.aliyun.com/competition/activeList
+    # v3 官方接口：返回进行中赛事（含报名/比赛截止时间与奖金），isActive=1 只取进行中
+    api_url: https://tianchi.aliyun.com/v3/proxy/competition/api/race/page
+    max_pages: 5
+  aicrowd:
+    enabled: true
+    url: https://www.aicrowd.com/challenges
   web_search:
     enabled: true
-    # 用搜索引擎补 CVPR / ECCV / CCF 竞赛通知（也可换成 Serper/Bing API）
+    # 搜索兜底优先走无 key 的 Bing 网页版；命中结果必须能解析出未来日期才保留
+    bing_fallback: true
+    # 查询词保持前瞻：只搜下一届赛事，避免整页都是已过期的旧届信息
     queries:
-      - "CVPR 2026 workshop challenge low-level vision 2026"
-      - "ECCV 2026 challenge super resolution denoising"
-      - "CCF 图像复原 竞赛 2026"
-      - "NTIRE 2026 challenge"
+      - "CVPR 2027 workshop challenge low-level vision"
+      - "NTIRE 2027 challenge image restoration"
+      - "MIPI 2027 challenge mobile imaging"
+      - "图像复原 挑战赛 2027 报名"
   curated:
-    # 人工兜底的赛事源：稳定、可校验，避免抓到过期信息
+    # 人工兜底的赛事源：稳定、可校验；页面过期 / 404 会被时效过滤自动跳过
     - name: NTIRE 2026
       url: https://www.cvlai.net/ntire/2026/
       desc: CVPR Workshop 旗下的图像复原挑战赛系列，赛道覆盖超分、去噪、去模糊与真实场景复原，baseline 完整，适合作为参赛起点。
+    - name: NTIRE 2027
+      url: https://www.cvlai.net/ntire/2027/
+      desc: NTIRE 下一届挑战赛主页，开放注册后从这里拿赛道与时间线。
     - name: MIPI Challenge
       url: https://mipi-challenge.org/
       desc: 面向移动端影像的挑战赛，赛题集中在 RAW 域去噪、去马赛克与低光增强，工程落地价值高。
+    - name: MIPI 2027
+      url: https://mipi-challenge.org/MIPI2027/
+      desc: MIPI 下一届挑战赛主页，页面开放后自动进入候选。
+  # 赛题方向标签的三级判定（competitions._contest_category 使用）：
+  # 1) 先按上方 categories 词表判底层视觉类目，但 weak_category_words 里的泛化词
+  #    （如「大模型」）在竞赛语境常指向 LLM / 具身方向，单独命中不算证据；
+  # 2) 底层视觉未命中时按 general_tracks 给中性方向标签，避免把具身 / 图网络
+  #    这类通用 AI 赛误标成「生成式复原」；
+  # 3) 仍然不命中才落「综合赛事」
+  weak_category_words: [大模型]
+  general_tracks:
+    具身与机器人: [具身, 机器人, 仿真, 机械臂, 自动驾驶, 智能驾驶]
+    大模型与智能体: [大模型, llm, 语言模型, 智能体, agent, 提示词]
+    图与数据智能: [图网络, 图神经网络, graph neural, 决策智能, 数据挖掘, 知识图谱]
+    AI 应用创新: [aigc, 黑客松, 应用创新, 融合创新, 创意, 内容生成]
   filter:
     min_score: 3.0
     top_n: 4

@@ -52,6 +52,24 @@
   button.ghost{background:transparent;}
   button:disabled{opacity:.5;cursor:not-allowed;transform:none;}
 
+  /* 生成进度条：放在各模块卡片内，点「生成一期」后展开，实时显示阶段与耗时 */
+  .runbox{margin-top:14px;padding:12px 12px 10px;background:#FAFBFD;border:1px solid #EEF0F5;border-radius:9px;}
+  .runbar{height:6px;background:#EEF0F5;border-radius:999px;overflow:hidden;}
+  .runbar-fill{height:100%;width:0%;border-radius:999px;
+    background:linear-gradient(90deg,#2A4BD7,#00A88F);transition:width .5s;}
+  .runmeta{display:flex;justify-content:space-between;gap:10px;margin-top:8px;font-size:11.5px;color:#6B7280;}
+  .runmeta .stage{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .runbox.failed .runbar-fill{background:#C0392B;}
+  .runbox.done .runbar-fill{background:#22B573;}
+  /* 阶段步骤条：抓取 → 筛选 → 配图 → 成稿 → 排版，按后端 progress.stage 高亮 */
+  .steps{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+  .steps span{font-size:11px;color:#98A2B3;background:#F2F4F8;border-radius:999px;padding:2px 9px;transition:all .3s;}
+  .steps span.active{color:#fff;background:var(--primary);}
+  .steps span.done{color:#1B7F55;background:#E6F6EE;}
+  .steps span.failed{color:#B42318;background:#FDECEA;}
+  .runlink{margin-top:8px;font-size:12px;}
+  .runlink a{color:var(--primary);font-weight:600;}
+
   .section-title{display:flex;align-items:center;justify-content:space-between;margin:34px 0 12px;}
   .section-title h3{font-size:14px;margin:0;letter-spacing:.3px;}
   .section-title span{font-size:12px;color:var(--sub);}
@@ -67,6 +85,10 @@
   .issue .ops{display:flex;gap:7px;}
   .empty{padding:26px;text-align:center;color:#9AA0AE;font-size:12.5px;background:#fff;
     border:1px dashed #DDE1EA;border-radius:11px;}
+
+  .wx-check-row{background:#fff;border:1px solid var(--line);border-radius:9px;
+    padding:9px 13px;margin-top:8px;font-size:12.5px;line-height:1.7;color:#3A3F4A;}
+  .wx-check-row b{color:#20242C;}
 
   .panel{background:#fff;border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin-top:16px;}
   .panel h3{font-size:13px;margin:0 0 12px;}
@@ -119,6 +141,12 @@
         <button class="primary" onclick="run('paper', this)">生成一期</button>
         <button onclick="openPrompt('paper')">看 Prompt</button>
       </div>
+      <div class="runbox" id="runbox-paper" hidden>
+        <div class="runbar"><div class="runbar-fill" id="bar-paper"></div></div>
+        <div class="runmeta"><span class="stage" id="stage-paper">准备中…</span><span id="elapsed-paper">0s</span></div>
+        <div class="steps" id="steps-paper"></div>
+        <div class="runlink" id="runlink-paper"></div>
+      </div>
     </div>
 
     <div class="card" data-module="industry">
@@ -131,6 +159,12 @@
       <div class="actions">
         <button class="primary" onclick="run('industry', this)">生成一期</button>
         <button onclick="openPrompt('industry')">看 Prompt</button>
+      </div>
+      <div class="runbox" id="runbox-industry" hidden>
+        <div class="runbar"><div class="runbar-fill" id="bar-industry"></div></div>
+        <div class="runmeta"><span class="stage" id="stage-industry">准备中…</span><span id="elapsed-industry">0s</span></div>
+        <div class="steps" id="steps-industry"></div>
+        <div class="runlink" id="runlink-industry"></div>
       </div>
     </div>
 
@@ -145,13 +179,23 @@
         <button class="primary" onclick="run('contest', this)">生成一期</button>
         <button onclick="openPrompt('contest')">看 Prompt</button>
       </div>
+      <div class="runbox" id="runbox-contest" hidden>
+        <div class="runbar"><div class="runbar-fill" id="bar-contest"></div></div>
+        <div class="runmeta"><span class="stage" id="stage-contest">准备中…</span><span id="elapsed-contest">0s</span></div>
+        <div class="steps" id="steps-contest"></div>
+        <div class="runlink" id="runlink-contest"></div>
+      </div>
     </div>
   </div>
 
   <div class="section-title">
     <h3>最近出稿</h3>
-    <span id="issue-count"></span>
+    <span>
+      <button class="ghost" onclick="wechatCheck(this)">微信连接体检</button>
+      <span id="issue-count"></span>
+    </span>
   </div>
+  <div id="wx-check" style="display:none"></div>
   <div id="issues"><div class="empty">还没有成稿。点上面的「生成一期」跑一遍全流程。</div></div>
 
   <div class="panel">
@@ -181,7 +225,17 @@
 
 <script>
 const MODULE_LABEL = {paper:"学术论文", industry:"业界进展", contest:"赛事竞赛"};
+const STAGES = ["抓取","筛选","配图","成稿","排版"];
 const logEl = document.getElementById("log");
+// 步骤条：已走过的阶段打勾，当前阶段高亮（stage 为 null 表示全部走完）
+function markSteps(ui, stage){
+  const idx = STAGES.indexOf(stage);
+  if(idx < 0 && stage !== null) return; // 阶段名不在步骤条里（如「启动」），保持现状
+  [...ui.steps.children].forEach((el, i)=>{
+    el.classList.toggle("done", stage === null || i < idx);
+    el.classList.toggle("active", i === idx);
+  });
+}
 function log(msg){
   const t = new Date().toLocaleTimeString("zh-CN", {hour12:false});
   logEl.textContent = `[${t}] ${msg}\n` + logEl.textContent;
@@ -228,6 +282,7 @@ function renderIssues(list){
       </div>
       <div class="ops">
         <a href="/preview/${x.issue_id}" target="_blank"><button>预览</button></a>
+        <button onclick="copyMarkdown('${x.issue_id}')">复制 MD</button>
         <button onclick="pushIssue('${x.issue_id}', this)">推草稿</button>
       </div>
     </div>`).join("");
@@ -244,46 +299,161 @@ async function loadIssues(){
   }catch(e){ log("拉取出稿列表失败：" + e); }
 }
 
+// 重置某个模块的进度条并展开（清掉上一次的结果样式与预览链接）
+function resetRunbox(module){
+  const ui = {
+    box: document.getElementById(`runbox-${module}`),
+    bar: document.getElementById(`bar-${module}`),
+    stage: document.getElementById(`stage-${module}`),
+    elapsed: document.getElementById(`elapsed-${module}`),
+    steps: document.getElementById(`steps-${module}`),
+    link: document.getElementById(`runlink-${module}`),
+  };
+  ui.box.hidden = false;
+  ui.box.classList.remove("done", "failed");
+  ui.bar.style.width = "0%";
+  ui.stage.textContent = "已触发，等待任务启动…";
+  ui.stage.title = "";
+  ui.steps.innerHTML = STAGES.map(s=>`<span>${s}</span>`).join("");
+  ui.link.innerHTML = "";
+  return ui;
+}
+
 async function run(module, btn){
+  const ui = resetRunbox(module);
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = "生成中…";
   log(`开始生成「${MODULE_LABEL[module]}」，抓取 + 成稿通常需要 1–3 分钟…`);
+  const startedAt = Date.now();
+  ui.elapsed.textContent = "0s";
+  const timer = setInterval(()=>{
+    ui.elapsed.textContent = Math.round((Date.now() - startedAt) / 1000) + "s";
+  }, 1000);
   try{
     const r = await fetch(`/api/run/${module}`, {
       method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({})
     });
     if(!r.ok){ throw new Error(await r.text()); }
     const {job_id} = await r.json();
-    await poll(job_id, module);
+    await poll(job_id, module, btn, old, ui, startedAt, timer);
   }catch(e){
+    clearInterval(timer);
+    ui.box.classList.add("failed");
+    ui.stage.textContent = "触发失败：" + e.message;
     log("触发失败：" + e.message);
-  }finally{
     btn.disabled = false; btn.textContent = old;
   }
 }
 
-async function poll(jobId, module){
-  for(let i=0;i<180;i++){
-    await new Promise(r=>setTimeout(r, 2000));
-    const r = await fetch(`/api/jobs/${jobId}`);
-    if(!r.ok){ log("任务丢失"); return; }
-    const d = await r.json();
+async function poll(jobId, module, btn, oldLabel, ui, startedAt, timer){
+  let seenEvents = 0; // 只把新增的里程碑事件写进日志，避免轮询重复刷屏
+  while(true){
+    await new Promise(r=>setTimeout(r, 1500));
+    let d;
+    try{
+      const r = await fetch(`/api/jobs/${jobId}`);
+      if(!r.ok){ throw new Error("job 丢失"); }
+      d = await r.json();
+    }catch(e){
+      // 任务表在服务进程内存里：uvicorn --reload 热重启或服务退出都会让查询 404
+      clearInterval(timer);
+      ui.box.classList.add("failed");
+      ui.stage.textContent = "任务查询失败：服务可能已重启（改代码会中断运行中的任务）";
+      log(`【${MODULE_LABEL[module]}】任务查询失败——服务可能已重启，请重新点「生成一期」`);
+      btn.disabled = false; btn.textContent = oldLabel;
+      return;
+    }
+    const p = d.progress || {};
+    if(p.pct != null) ui.bar.style.width = p.pct + "%";
+    if(p.stage) ui.stage.textContent = `${p.stage} · ${p.msg}`;
+    markSteps(ui, p.stage || null);
+    (d.events || []).slice(seenEvents).forEach(e=>{
+      log(`【${MODULE_LABEL[module]}·${e.stage}】${e.msg}`);
+      seenEvents++;
+    });
     if(d.status === "done"){
-      log(`完成：${d.title}（抓取 ${d.stats?.fetched ?? "?"} 条 / 选用 ${d.stats?.selected ?? "?"} 条 / ${d.stats?.seconds ?? "?"}s）`);
-      if((d.stats?.errors||[]).length){
-        d.stats.errors.forEach(e=>log(`源告警：${e.source || e.stage} — ${e.error}`));
-      }
-      toast("已生成，正在打开预览");
-      window.open(`/preview/${d.issue_id}`, "_blank");
-      loadIssues(); return;
+      clearInterval(timer);
+      ui.box.classList.add("done");
+      ui.bar.style.width = "100%";
+      markSteps(ui, null);
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      ui.stage.textContent = `✓ 完成 · 用时 ${secs}s · 抓取 ${d.stats?.fetched ?? "?"} 条 / 选用 ${d.stats?.selected ?? "?"} 条`;
+      ui.link.innerHTML = `<a href="/preview/${d.issue_id}" target="_blank">打开预览 →</a>`
+        + ` · <a href="#" onclick="copyMarkdown('${d.issue_id}'); return false;">复制 Markdown</a>`;
+      log(`完成：${d.title}（抓取 ${d.stats?.fetched ?? "?"} 条 / 选用 ${d.stats?.selected ?? "?"} 条 / 用时 ${secs}s）`);
+      (d.stats?.errors || []).forEach(e=>log(`源告警：${e.source || e.stage} — ${e.error}`));
+      toast("已生成，点击卡片里的「打开预览」查看");
+      loadIssues();
+      btn.disabled = false; btn.textContent = oldLabel;
+      return;
     }
     if(d.status === "failed"){
-      log("失败：" + JSON.stringify(d.errors, null, 2));
-      toast("生成失败，看日志");
+      clearInterval(timer);
+      ui.box.classList.add("failed");
+      ui.bar.style.width = "100%";
+      // errors 末尾是致命错误（前面的是源告警），与后端 fatal 的取法保持一致
+      const fatal = (d.errors && d.errors.length) ? d.errors[d.errors.length - 1] : {};
+      const err = String(fatal.error || "");
+      ui.stage.textContent = `✗ 失败（${fatal.stage || "?"}）：${err.slice(0, 220)}${err.length > 220 ? "…（悬停看全文）" : ""}`;
+      ui.stage.title = err;          // 完整错误挂在 tooltip 上，完整明细在运行日志
+      markSteps(ui, fatal.stage || null);
+      const failIdx = STAGES.indexOf(fatal.stage);
+      if(failIdx >= 0) ui.steps.children[failIdx].classList.replace("active", "failed");
+      log(`【${MODULE_LABEL[module]}】失败详情：\n` + JSON.stringify(d.errors, null, 2));
+      toast("生成失败，详情见运行日志");
+      btn.disabled = false; btn.textContent = oldLabel;
       return;
     }
   }
-  log("任务超时，请查看服务端日志");
+}
+
+// 复制某期 Markdown：从 /markdown/{id} 取原文，粘到公众号正文区即可
+async function copyMarkdown(id){
+  try{
+    const r = await fetch(`/markdown/${id}`);
+    if(!r.ok){ throw new Error("Markdown 文件不存在，请重新生成"); }
+    const md = await r.text();
+    await copyText(md);
+    toast("Markdown 已复制，去公众号正文区粘贴");
+    log(`已复制 Markdown：${id}（${md.length} 字符）`);
+  }catch(e){
+    log("复制 Markdown 失败：" + e.message);
+    toast("复制失败：" + e.message);
+  }
+}
+async function copyText(text){
+  // clipboard API 只在 https / localhost 可用，局域网 IP 访问时退回 execCommand
+  try{ await navigator.clipboard.writeText(text); return; }
+  catch(e){ /* 走下面的兼容分支 */ }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.cssText = "position:fixed;left:-9999px;top:0";
+  document.body.appendChild(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  document.body.removeChild(ta);
+  if(!ok){ throw new Error("浏览器拒绝写入剪贴板"); }
+}
+
+async function wechatCheck(btn){
+  if(btn){ btn.disabled = true; btn.textContent = "体检中…"; }
+  const box = document.getElementById("wx-check");
+  box.style.display = "block";
+  box.innerHTML = '<div class="empty">正在连接微信接口…</div>';
+  try{
+    const r = await fetch("/api/wechat/check");
+    const d = await r.json();
+    box.innerHTML = d.checks.map(c =>
+      `<div class="wx-check-row">${c.ok ? "✅" : "❌"} <b>${c.item}</b>：${c.msg}</div>`
+    ).join("") + (d.ok
+      ? '<div class="wx-check-row">全部通过，可以推草稿了。</div>'
+      : '<div class="wx-check-row">按上面提示处理后，再点一次「微信连接体检」。</div>');
+    log(d.ok ? "微信连接体检：全部通过" : "微信连接体检：未通过（见体检区提示）");
+  }catch(e){
+    box.innerHTML = `<div class="wx-check-row">❌ 体检请求失败：${e.message}</div>`;
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = "微信连接体检"; }
+  }
 }
 
 async function pushIssue(id, btn){
@@ -298,6 +468,9 @@ async function pushIssue(id, btn){
   }catch(e){
     log("推送失败：" + e.message);
     toast("推送失败：" + e.message);
+    if(/白名单|40164|无权限|48001|Secret/.test(e.message)){
+      wechatCheck(document.querySelector(".section-title .ghost"));
+    }
   }finally{ btn.disabled = false; }
 }
 

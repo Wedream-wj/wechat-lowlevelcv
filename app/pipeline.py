@@ -5,23 +5,33 @@
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from . import db
 from .config import settings, topics
 from .filters import scoring
 from .llm.client import LLMClient, LLMError
+from .llm.prompts import (
+    drop_unsupported_tables,
+    has_numeric_material,
+    quant_retry_instruction,
+    thin_evidence,
+    unsupported_prose_numbers,
+    unsupported_table_numbers,
+)
 from .models import Article, Item
 from .render import cover as cover_mod
 from .render import wechat
 from .render.markdown import spec_to_markdown
 from .render.preview import render_preview
-from .sources import MODULE_LABEL, collect
+from .sources import MODULE_LABEL, arxiv, collect
 from .sources.base import HttpClient
 
 DATE_FMT = "%Y.%m.%d"
@@ -41,10 +51,10 @@ class RunResult:
 async def build_figures(client: HttpClient, items: list[Item], module: str) -> dict[str, dict]:
     """把素材里的图片落到本地，并编成 F1/F2 引用表。"""
     figures: dict[str, dict] = {}
-    max_total = 4 if module == "paper" else 2
+    max_total = 5 if module == "paper" else 2
     index = 0
     for item in items:
-        for src in (item.images or [])[: 2 if module == "paper" else 1]:
+        for ordinal, src in enumerate((item.images or [])[: 3 if module == "paper" else 1]):
             if index >= max_total:
                 return figures
             local = ""
@@ -56,7 +66,21 @@ async def build_figures(client: HttpClient, items: list[Item], module: str) -> d
                 continue
             index += 1
             ref = f"F{index}"
-            caption = item.extra.get("figure_caption") or item.summary[:80] or item.title
+            # 论文素材：enrich 阶段把 images 重排成「架构图 → 结果图」并把对应图注
+            # 写进 extra["figure_captions"]（与 images 等长）。未 enrich 的条目
+            # （如熵视列表页缩略图）没有图注，用中性兜底——绝不拿摘要裸文本当图注
+            if module == "paper":
+                caps = item.extra.get("figure_captions") or []
+                if ordinal < len(caps) and caps[ordinal]:
+                    caption = caps[ordinal]
+                elif ordinal == 0:
+                    caption = item.extra.get("figure_caption") or "论文配图（自动抓取）"
+                elif ordinal == 1:
+                    caption = item.extra.get("figure_caption_2") or "实验结果对比图"
+                else:
+                    caption = "论文插图"
+            else:
+                caption = (item.summary or "")[:80] or item.title
             # 统一存相对 out/ 的路径：预览页与推送（rewrite_images 以 out_dir 为根解析）都能用
             try:
                 rel = Path(os.path.relpath(local, settings.out_dir)).as_posix()
@@ -86,7 +110,16 @@ def _relative_asset(path: str) -> str:
 
 
 async def run_module(module: str, *, publish: bool | None = None,
-                     date_str: str | None = None, top_n: int | None = None) -> RunResult:
+                     date_str: str | None = None, top_n: int | None = None,
+                     demo: bool = False,
+                     progress: Callable[..., None] | None = None) -> RunResult:
+    """demo=True：走完整抓取/筛选/配图/成稿/渲染链路，但不写库、不记已用、不推送。
+
+    用于本地生成演示稿（scripts/demo.py），跑多少次都不影响线上选题与去重。
+
+    progress(stage, pct, msg, event=False)：可选进度回调（控制台轮询用）。
+    只在里程碑处发 event=True；进度回调自身绝不允许把流水线搞挂。
+    """
     started = time.time()
     run_id = uuid.uuid4().hex[:12]
     started_iso = datetime.now().isoformat()
@@ -96,41 +129,140 @@ async def run_module(module: str, *, publish: bool | None = None,
     def _log(msg: str) -> None:
         print(f"[pipeline:{module}] {msg}", flush=True)
 
+    last_pct = 0
+
+    def report(stage: str, pct: int, msg: str, event: bool = False) -> None:
+        nonlocal last_pct
+        if progress is None:
+            return
+        # 进度条只许前进：思考/写作阶段的字符数估算会有波动，回退看起来像卡死重来
+        last_pct = max(last_pct, min(99, int(pct)))
+        try:
+            progress(stage, last_pct, msg, event)
+        except Exception:  # 进度回调只影响展示，绝不能反向打断任务
+            pass
+
     try:
-        items, collect_errors = await collect(module)
+        collect_cb = lambda p, m: report("抓取", 2 + int(p * 0.23), m, True)
+        items, collect_errors = await collect(module, progress=collect_cb)
         errors.extend(collect_errors)
         _log(f"抓取 {len(items)} 条，源告警 {len(collect_errors)} 个")
         if not items:
             raise PipelineError("所有数据源都没有返回内容（检查网络 / RSS 地址 / API 凭证）")
 
+        report("筛选", 28, f"抓取完成：{len(items)} 条素材，开始评分与去重", True)
+
         # 注意顺序：先在「写库前」取已用指纹，否则刚抓到的条目会被当成已用过
-        seen = db.seen_fingerprints(module, days=45)
-        db.save_items(items, module)
+        # demo 模式不写库：指纹快照置空、素材不落库，重复跑不污染线上选题
+        seen = set() if demo else db.seen_fingerprints(module, days=45)
+        if not demo:
+            db.save_items(items, module)
 
         selected = scoring.select(items, topics, module, top_n=top_n, seen=seen)
-        _log("选用 " + "；".join(f"{i.title[:24]}({i.score})" for i in selected))
         if not selected:
-            detail = {
-                "fetched": len(items),
-                "top_scores": [
-                    {"title": i.title[:60], "score": i.score, "hits": i.keywords[:4]}
-                    for i in sorted(items, key=lambda x: x.score, reverse=True)[:5]
-                ],
-                "errors": errors,
-            }
-            raise PipelineError(f"抓到了 {len(items)} 条，但都被筛选规则挡掉了：{detail}")
+            # 失败要可读：漏斗说明每层挡了多少，再给最高分候选供运营对照阈值
+            funnel = scoring.funnel_stats(items, topics, module, seen=seen)
+            top = sorted(items, key=lambda x: x.score, reverse=True)[:3]
+            top_desc = "；".join(
+                f"{i.title[:32]}（{i.score}分，命中{i.keywords[:3] or '无'}）" for i in top
+            ) or "（无候选）"
+            raise PipelineError(
+                f"抓到 {len(items)} 条但筛选后为 0。漏斗：{funnel['total']} 条中 "
+                f"已用去重挡 {funnel['seen']}、分数不足挡 {funnel['score']}、"
+                f"关键词未命中挡 {funnel['keywords']}、超期挡 {funnel['freshness']}，"
+                f"通过 {funnel['pass']}。最高分候选：{top_desc}。"
+                f"源告警 {len(errors)} 个。"
+            )
+        _log("选用 " + "；".join(f"{i.title[:24]}({i.score})" for i in selected))
+        report("筛选", 32, f"筛选完成：选用 {len(selected)} 条 / 共 {len(items)} 条", True)
 
+        report("配图", 35, "补抓论文实验数据表与结论数字…", True)
         async with HttpClient() as client:
+            # enrich 必须在 select 之后：它很贵（每篇一趟 HTML），只给入选的几篇补
+            if module == "paper":
+                _log(f"补抓 {len(selected)} 篇论文的实验数据（每篇约 20–40s）")
+                try:
+                    await asyncio.wait_for(
+                        arxiv.enrich_figures(client, selected, limit=len(selected)),
+                        timeout=200.0,
+                    )
+                except asyncio.TimeoutError:
+                    msg = "补抓实验数据总超时（>200s），本期可能缺少对比表"
+                    errors.append({"source": "arXiv 实验数据", "error": msg})
+                    _log(msg)
+                except Exception as exc:  # 补数据失败不该让整期无稿
+                    msg = f"补抓实验数据失败：{type(exc).__name__}: {exc}"
+                    errors.append({"source": "arXiv 实验数据", "error": msg})
+                    _log(msg)
+                for item in selected:
+                    tables = len(item.extra.get("tables") or [])
+                    snippets = len(item.extra.get("result_snippets") or [])
+                    _log(f"素材 {item.title[:20]}：表 {tables} 张、数值结论 {snippets} 条")
+            report("配图", 42, "下载与整理配图…", True)
             figures = await build_figures(client, selected, module)
         _log(f"配图 {len(figures)} 张")
+        report("配图", 48, f"配图完成：{len(figures)} 张", True)
 
         llm = LLMClient()
         try:
-            spec = await llm.write(module, selected, figures, date_str)
-        except LLMError as exc:
-            raise PipelineError(f"大模型成稿失败：{exc}") from exc
-        _log(f"成稿完成（{llm.mode}）：{spec.get('title', '')}")
+            report("成稿", 50, f"调用大模型成稿（{llm.mode}）…", True)
 
+            def on_llm(kind: str, n: int) -> None:
+                if kind == "reasoning":
+                    # 推理模型先思考再动笔；不显示这段的话进度条会长时间停在 50%
+                    report("成稿", min(50 + int(n * 20 / 20000), 70),
+                           f"模型思考中… 已推理约 {n} 字符")
+                elif kind == "retry":
+                    report("成稿", 60, "上一次输出不是合法 JSON，正在让模型基于同一批素材重写…", True)
+                else:
+                    report("成稿", min(70 + int(n * 15 / 6000), 85),
+                           f"模型写作中… 已输出约 {n} 字符")
+
+            spec = await llm.write(module, selected, figures, date_str, on_progress=on_llm)
+            # 表格里的数字必须能在素材里找到；素材里一个数字都没有时，出现表格更是编的。
+            # 素材有数据却写成「无法量化」也要补写。
+            if module == "paper" and llm.enabled:
+                has_numbers = has_numeric_material(selected)
+                bad_numbers = unsupported_table_numbers(spec, selected)
+                for tok in unsupported_prose_numbers(spec, selected):
+                    if tok not in bad_numbers:
+                        bad_numbers.append(tok)
+                if bad_numbers or (has_numbers and thin_evidence(spec)):
+                    if bad_numbers:
+                        report("成稿", 86, "首稿实验解读里的数字对不上素材，要求照抄原文重写…", True)
+                        _log("首稿含素材中找不到的数字：" + "、".join(bad_numbers[:6]))
+                    else:
+                        report("成稿", 86, "首稿没引用实验数值，要求模型补写量化对比…", True)
+                        _log("首稿 03/04 节缺少数值证据，带补写指令重写一次")
+                    try:
+                        spec = await llm.write(
+                            module, selected, figures, date_str,
+                            on_progress=on_llm,
+                            extra_instruction=quant_retry_instruction(bad_numbers, has_numbers),
+                        )
+                        dropped = drop_unsupported_tables(spec, selected)
+                        if dropped:
+                            _log(f"重写后仍有 {dropped} 张表格含未核实数字，已移除")
+                        left = unsupported_prose_numbers(spec, selected)
+                        if left:
+                            _log("重写后仍有对不上的数字，保留原稿请人工核对：" + "、".join(left[:6]))
+                    except LLMError as exc:
+                        _log(f"量化重写失败，保留首稿：{exc}")
+            llm_mode = llm.mode
+        except LLMError as exc:
+            if demo:
+                # demo 的目的是出样稿：大模型失败也降级 mock 完成整条链路，失败原因醒目带出
+                from .llm.mock import mock_spec
+
+                _log(f"大模型成稿失败，已降级 mock 出稿（正式运行会在此报错）：{exc}")
+                spec = mock_spec(module, selected, figures)
+                llm_mode = "mock（live 失败降级）"
+            else:
+                raise PipelineError(f"大模型成稿失败：{exc}") from exc
+        _log(f"成稿完成（{llm_mode}）：{spec.get('title', '')}")
+        report("成稿", 85, f"成稿完成（{llm_mode}）：{spec.get('title', '')}", True)
+
+        report("排版", 88, "渲染微信排版与预览页…", True)
         cover_path = cover_mod.make_cover(spec, module, date_str)
         body = wechat.render_body(spec, figures, module, date_str)
         markdown = spec_to_markdown(spec, figures)
@@ -147,12 +279,17 @@ async def run_module(module: str, *, publish: bool | None = None,
             created_at=datetime.now(),
             status="rendered",
         )
-        issue_id = db.save_article(article)
-        db.mark_used(selected, issue_id)
+        if demo:
+            issue_id = f"demo-{module}-{datetime.now():%Y%m%d%H%M}"
+            article.issue_id = issue_id
+        else:
+            issue_id = db.save_article(article)
+            db.mark_used(selected, issue_id)
 
         preview = render_preview(
             spec,
             body,
+            markdown,
             module,
             _relative_asset(cover_path),
             issue_id,
@@ -160,12 +297,13 @@ async def run_module(module: str, *, publish: bool | None = None,
             MODULE_LABEL.get(module, module),
         )
         _preview_path(issue_id).write_text(preview, encoding="utf-8")
+        report("排版", 97, f"预览已生成：preview_{issue_id}.html", True)
 
         # 附一份 Markdown 与 HTML 便于人工二次编辑
         (settings.out_dir / f"{issue_id}.md").write_text(markdown, encoding="utf-8")
         (settings.out_dir / f"{issue_id}.html").write_text(body, encoding="utf-8")
 
-        should_publish = settings.auto_publish if publish is None else publish
+        should_publish = False if demo else (settings.auto_publish if publish is None else publish)
         if should_publish:
             article = await push_issue(issue_id)
 
@@ -173,16 +311,19 @@ async def run_module(module: str, *, publish: bool | None = None,
             "fetched": len(items),
             "selected": len(selected),
             "figures": len(figures),
+            "issue_id": issue_id,
             "preview": str(_preview_path(issue_id)),
-            "llm_mode": llm.mode,
+            "llm_mode": llm_mode,
             "seconds": round(time.time() - started, 1),
             "errors": errors,
         }
-        db.log_run(module, "success", str(stats), run_id, started_iso)
+        if not demo:
+            db.log_run(module, "success", str(stats), run_id, started_iso)
         return RunResult(article=article, errors=errors, stats=stats)
 
     except Exception as exc:
-        db.log_run(module, "failed", f"{type(exc).__name__}: {exc}", run_id, started_iso)
+        if not demo:
+            db.log_run(module, "failed", f"{type(exc).__name__}: {exc}", run_id, started_iso)
         return RunResult(article=None, errors=errors + [{"stage": "pipeline", "error": str(exc)}],
                          stats={"seconds": round(time.time() - started, 1)})
 

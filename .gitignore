@@ -1,0 +1,16 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# 环境与密钥
+.env
+
+# 运行产物
+data/*.db
+out/
+
+# 系统
+.DS_Store
+Thumbs.db

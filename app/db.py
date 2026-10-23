@@ -118,9 +118,16 @@ def save_items(items: Iterable[Item], module: str) -> tuple[int, int]:
 
 
 def seen_fingerprints(module: str, days: int = 60) -> set[str]:
+    """选题去重只挡「已经写进某一期」的素材（used_issue 非空）。
+
+    曾经的 bug：把「过去 N 天抓到过」也算 seen，而抓到的条目每次都会落库——
+    于是同模块第二次运行时几乎全部素材被当成已用而去重挡掉，筛选结果为 0。
+    RSS / GitHub trending 的返回集高度稳定，这个口径等于「一个模块永远只能出一期」。
+    """
     with connect() as conn:
         rows = conn.execute(
-            "SELECT fingerprint FROM items WHERE module=? AND created_at >= datetime('now', ?)",
+            "SELECT fingerprint FROM items WHERE module=? AND used_issue IS NOT NULL"
+            " AND created_at >= datetime('now', ?)",
             (module, f"-{days} days"),
         ).fetchall()
     return {r["fingerprint"] for r in rows}

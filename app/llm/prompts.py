@@ -12,6 +12,8 @@ ArticleSpec 支持的块类型：
 """
 from __future__ import annotations
 
+import re
+
 from ..config import topics
 
 BRAND = topics.raw.get("brand", {})
@@ -38,6 +40,8 @@ SYSTEM = f"""你是公众号「{BRAND_NAME}」的主笔，长期跟踪底层视�
 
 【硬性约束】
 - 所有数字（PSNR、参数量、FPS、奖金、日期）必须能在给定素材中找到。找不到就不写，或写「论文未披露」。
+- 素材里给了实验表格或带数字的结论句时，正文必须引用其中至少 3 个具体数字并写出比较（谁比谁高多少）；
+  禁止用「素材未提供具体数值」「无法量化」这类说明搪塞——先把手上的数字用完，再谈信息边界。
 - 不得编造作者单位、开源地址、成绩排名。
 - 不得引用素材之外的图片 URL。需要配图时只引用给定的 F 编号。
 - 输出必须是合法 JSON，不要 Markdown 代码块包裹，不要任何解释性文字。
@@ -78,6 +82,9 @@ FACT_RULES = """
 【事实纪律】
 - 素材里没有的数字，一个都不要写。
 - 不确定的信息（如作者单位、奖金池）写「官方未公布」，不要猜。
+- 素材的 tables / result_snippets 里有数字时，必须引用至少 3 个并写出比较差值
+  （「25.26 vs 24.10，高 1.16 dB」这种），不得用「论文未提供具体数值」「无法量化」搪塞。
+- 某个指标确实没给时，写「论文未披露 X」，同时把已经给出的数字写出来，不要因为缺一项就整节摆烂。
 - 评价要落在具体设计上：说「用熵路由把平滑区和高频区分开，避免了教师伪影污染」，
   而不是「设计非常巧妙」。
 - 如果素材质量不足以支撑一整篇，就诚实写出信息边界，不要注水。
@@ -90,19 +97,29 @@ PAPER_PROMPT = """
 【结构建议】
 1. 导语（lead，2 段）：第一段用一个具体场景/矛盾把读者拉进来；第二段交代这篇论文干了什么、为什么值得读。
 2. meta_card：论文信息卡（标题、会议/期刊、作者团队、研究机构、开源代码）。信息不全的行直接省略。
-3. h2 "01 | 这篇在解决什么问题"：讲清任务背景与已有方法的死结。要具体到方法层面，不要泛泛说「效果不好」。
-4. h2 "02 | 方法拆解"：核心。先用一段话讲整体思路，再按模块拆（h3 + p / bullets）。
-   必须引用架构图（figure，ref 用素材提供的编号）。每个模块要说清「为什么这么设计」，而不只是「是什么」。
-5. h2 "03 | 实验说明了什么"：只挑最有信息量的 2–3 组结果。有表格就用 table，不要把所有指标抄一遍。
-   重点解释「提升来自哪里」「在什么条件下会失效」。
-6. h2 "04 | 代价与适用边界"：这是本号的差异化。写清计算量、数据依赖、真实场景泛化性、工程落地难点。
-   如果论文没有讨论，就由你来指出，但要用「值得注意的是」这类措辞区分作者结论与你的判断。
-7. takeaway：一句话给结论，告诉读者「什么情况下该用这个方法」。
+3. h2 "01 | 研究背景与痛点"：讲清任务背景与已有方法的具体死结（卡在哪个环节、为什么走不通），
+   不要泛泛说「效果不好」。能点名被挑战的 SOTA 方法更好。
+4. h2 "02 | 核心创新与方法拆解"：核心。先用一段话讲整体思路，再按模块拆（h3 + p / bullets）。
+   必须引用架构图（figure，ref 用素材提供的编号，图注写「图 X：…」）。
+   每个模块要说清「为什么这么设计、替代了已有方法的哪个组件」，而不只是「是什么」。
+5. h2 "03 | 关键实验结果解读"：这是全文证据段，必须有硬数字。
+   素材 tables 是从论文 HTML 直接抽出的实验对比表，数字可信：**至少用 table 块原样呈现 1 张**
+   （可裁列，但数字照抄、不得改写），表格前后各写一段解读：
+   提升集中在哪些指标、比最强对手高/低多少（写成「PSNR 高 0.42 dB」「LPIPS 低 0.019」这样的差值，
+   差值必须拿表里两个数逐位现算），
+   代价是什么。正文合计至少引用 3 个来自 tables 或 result_snippets 的具体数字。
+   **禁止自己另拼一张表**：表格里每个数字都必须来自素材 tables，素材没有的数字一个都不许写。
+   素材里有第二张 figure（结果对比图）时引用它，图注写「图 X：…」。
+   **禁止**出现「素材未提供具体数值」「无法量化」「表格数据缺失」这类内部说明。
+6. h2 "04 | 与 SOTA 的对比与代价"：把表格数字翻译成结论。点名最强对手（方法名 + 它在哪项指标多少），
+   写清领先/落后多少、参数量与推理开销（Params / 速度，素材有就写数字，没有写「论文未披露推理开销」）、
+   什么场景下会被反超。作者结论与你的判断用「值得注意的是」区分。
+7. h2 "05 | 顺带值得一看"（仅当一期有多篇候选）：其余 1–2 篇各 2–3 句（bullets）。单篇素材时省略本节。
+8. takeaway：一句话给结论，告诉读者「什么情况下该用这个方法」。
 
 【写作要求】
 - 至少引用 1 张图；图注要写「图 X：…」，并解释图中哪一部分对应正文哪句话。
-- 不要按论文章节顺序流水账。按「问题—方法—证据—边界」重组。
-- 如果一期有多篇候选，主推 1 篇写透；其余 1–2 篇放在 h2 "05 | 顺带值得一看" 下，每篇 2–3 句（bullets）。
+- 不要按论文章节顺序流水账。按「问题—方法—证据—对比—边界」重组。
 """ + FACT_RULES + SPEC_GUIDE
 
 # ---------------------------------------------------------------- 模块 B
@@ -142,6 +159,9 @@ CONTEST_PROMPT = """
 5. takeaway：一句话，比如「离截止还有 X 天，先跑通 baseline 再谈创新」。
 
 【写作要求】
+- 素材已经过时效过滤，只包含未截止、仍在进行或即将开始的赛事：不要再推荐素材之外的赛事。
+- deadline 照抄素材原文；素材里的 days_left 是距截止的剩余天数，解读时写成「剩 N 天」；
+  没有日期的写「待官方公布」，绝不自行补一个日期。
 - 赛事名称、奖金、时间节点必须来自素材；缺失写「待官方公布」，绝不编造。
 - 每条赛事必须给出「赛题方向」，不能只写名称。
 - 难度判断要说明依据（数据规模、是否有 baseline、往届参赛人数）。
@@ -151,6 +171,275 @@ CONTEST_PROMPT = """
 PROMPTS = {"paper": PAPER_PROMPT, "industry": INDUSTRY_PROMPT, "contest": CONTEST_PROMPT}
 
 MODULE_TITLE = {"paper": "论文精读", "industry": "业界观察", "contest": "赛事速递"}
+# 素材里有数字、成稿却没引用时的补写要求（见 thin_evidence 判定）
+QUANT_RETRY = (
+    "这一稿的实验解读缺少数值证据，读起来没有说服力。请保持原有的结构、标题与已写的分析，"
+    "但务必重写「关键实验结果解读」与「与 SOTA 的对比与代价」两节：\n"
+    "1) 至少用 1 个 table 块把素材 tables 里的一张实验对比表原样呈现（数字照抄，可裁列）；\n"
+    "2) 正文合计引用至少 3 个来自 tables 或 result_snippets 的具体数字，并写出比较差值\n"
+    "   （例如「PSNR 25.26 vs 24.64，高 0.62 dB」「LPIPS 0.1253 对比 0.1382 更低」）；\n"
+    "3) 点名最强对手与它的指标，写清领先/落后多少，以及参数量、推理开销的代价；\n"
+    "4) 删除「素材未提供具体数值」「无法量化」这类内部说明。数字只能来自素材，不得编造。"
+)
+
+# 素材里一个实验数字都没有时的补写要求：此时任何指标表都是编的
+NO_NUMERIC_RETRY = (
+    "这一稿的实验解读用了素材里并不存在的数字或表格，属于编造，必须改掉。"
+    "这批素材里没有任何实验表格或带数字的结论句，所以「关键实验结果解读」"
+    "与「与 SOTA 的对比与代价」两节：\n"
+    "1) 删除所有 table 块，以及所有具体指标数值（PSNR/SSIM/LPIPS/参数量/耗时等一个都不要写）；\n"
+    "2) 只引用素材原文里确实出现的相对说法（例如摘要里的「提速 100 倍」「码率节省超过 50%」），"
+    "并说明它相对哪个基线；\n"
+    "3) 用定性语言讲清强弱与代价：谁在保真或感知上更强、代价落在参数量还是推理步数、什么场景会被反超；\n"
+    "4) 不要写「素材未提供」「无法量化」这类内部说明，也不要解释为什么没有数字。"
+)
+
+_DIGIT_RE = re.compile(r"\d")
+# 数字 token（含小数与千分位），用于核对表格 cells 是否真的来自素材
+_NUM_TOKEN_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+# 证据段（03/04）小标题；正文里的百分比、倍数是派生说法，不参与差值核对
+_EVIDENCE_HEAD_RE = re.compile(r"^0?[34]\b|^0?[34]\s*[\|｜.、:：]")
+_PROSE_NUM_RE = re.compile(r"(?<![\d.])\d+\.\d+(?![\d.])(?!\s*[%％×倍x])")
+# 指标名：正文里「差值」跟着哪个指标，就只在该指标的数值行/列里核对
+_METRIC_RE = re.compile(r"HDR-VDP2|DISTS|MANIQA|MUSIQ|CLIPIQA|LPIPS|PSNR|SSIM|BPP", re.I)
+
+
+def has_numeric_material(items: list) -> bool:
+    """素材里是否带了可引用的实验数据（表格或带指标的结论句）。"""
+    for item in items:
+        extra = getattr(item, "extra", {}) or {}
+        if extra.get("tables") or extra.get("result_snippets"):
+            return True
+    return False
+
+
+def thin_evidence(spec: dict) -> bool:
+    """03/04 两节是否完全没有数字证据（无表格且正文不含任何数字）。"""
+    in_evidence = False
+    for block in spec.get("sections") or []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        text = str(block.get("text") or "")
+        if kind in ("h2", "h3"):
+            # 小节标题以 03/04 开头即进入证据区间，遇到别的小节退出
+            in_evidence = bool(_EVIDENCE_HEAD_RE.match(text.strip()))
+            continue
+        if not in_evidence:
+            continue
+        if kind == "table":
+            return False
+        blob = text + " " + " ".join(str(x) for x in (block.get("items") or []))
+        if _DIGIT_RE.search(blob):
+            return False
+    return True
+
+
+def material_number_pool(items: list) -> set[str]:
+    """素材里出现过的全部数字 token（表格 cells + 数值结论句 + 标题摘要）。"""
+    pool: set[str] = set()
+    for item in items:
+        extra = getattr(item, "extra", {}) or {}
+        texts: list[str] = [getattr(item, "title", "") or "", getattr(item, "summary", "") or ""]
+        for table in extra.get("tables") or []:
+            texts.extend(str(c) for c in table.get("header") or [])
+            for row in table.get("rows") or []:
+                texts.extend(str(c) for c in row or [])
+        texts.extend(str(s) for s in extra.get("result_snippets") or [])
+        for text in texts:
+            pool.update(tok.replace(",", "") for tok in _NUM_TOKEN_RE.findall(text))
+    return pool
+
+
+def _table_bad_numbers(block: dict, pool: set[str]) -> list[str]:
+    cells: list = list(block.get("header") or [])
+    for row in block.get("rows") or []:
+        cells.extend(row or [])
+    bad: list[str] = []
+    for cell in cells:
+        for tok in _NUM_TOKEN_RE.findall(str(cell)):
+            tok = tok.replace(",", "")
+            if tok not in pool and tok not in bad:
+                bad.append(tok)
+    return bad
+
+
+def unsupported_table_numbers(spec: dict, items: list) -> list[str]:
+    """成稿表格里出现、但素材中找不到的数字（模型自造对比表的典型症状）。"""
+    pool = material_number_pool(items)
+    bad: list[str] = []
+    for block in spec.get("sections") or []:
+        if isinstance(block, dict) and block.get("type") == "table":
+            bad.extend(n for n in _table_bad_numbers(block, pool) if n not in bad)
+    return bad
+
+
+def drop_unsupported_tables(spec: dict, items: list) -> int:
+    """重写后仍编数字时的兜底：删掉含未核实数字的 table 块，返回删除张数。"""
+    pool = material_number_pool(items)
+    kept, dropped = [], 0
+    for block in spec.get("sections") or []:
+        if isinstance(block, dict) and block.get("type") == "table" and _table_bad_numbers(block, pool):
+            dropped += 1
+            continue
+        kept.append(block)
+    if dropped:
+        spec["sections"] = kept
+    return dropped
+
+
+def _cell_numbers(cell: str) -> list[float]:
+    nums: list[float] = []
+    for tok in _NUM_TOKEN_RE.findall(str(cell)):
+        try:
+            nums.append(float(tok.replace(",", "")))
+        except ValueError:
+            continue
+    return nums
+
+
+def _material_number_groups(items: list) -> list[tuple[set[float], list[list[float]]]]:
+    """每张素材表/每条数值结论句：数值集合 + 同行同列（同句内）的数值分组。
+
+    差值只允许在同一行、同一列或同一句里成立。一张 9 列表里任意两数相减，
+    两位小数几乎总能凑出目标值（实测 2.81 被 22.87-25.68 蒙中），那样闸门等于没有。
+    """
+    groups: list[tuple[set[float], list[list[float]]]] = []
+    for item in items:
+        extra = getattr(item, "extra", {}) or {}
+        for table in extra.get("tables") or []:
+            header = [str(c) for c in (table.get("header") or [])]
+            rows = [[str(c) for c in (row or [])] for row in (table.get("rows") or [])]
+            values: set[float] = set()
+            lines: list[list[float]] = []
+            columns: dict[int, list[float]] = {}
+            for ci, cell in enumerate(header):
+                nums = _cell_numbers(cell)
+                values.update(nums)
+                columns.setdefault(ci, []).extend(nums)
+            for row in rows:
+                line: list[float] = []
+                for ci, cell in enumerate(row):
+                    nums = _cell_numbers(cell)
+                    values.update(nums)
+                    line.extend(nums)
+                    columns.setdefault(ci, []).extend(nums)
+                lines.append(line)
+            lines.extend(columns.values())
+            groups.append((values, lines))
+        for snippet in extra.get("result_snippets") or []:
+            nums = _cell_numbers(snippet)
+            if len(nums) >= 2:
+                groups.append((set(nums), [nums]))
+    return groups
+
+
+def _metric_name(text: str) -> str:
+    m = _METRIC_RE.search(str(text))
+    return m.group(0).upper() if m else ""
+
+
+def _metric_lines(items: list) -> dict[str, list[list[float]]]:
+    """按指标名归拢素材表里的数值行与数值列，供「差值必须落在同名指标内」核对。
+
+    只看「同一行/同一列」仍然太宽：实测 2.82 被一张无关表里 39.35-36.53 蒙中，
+    而正文那句话讲的是 MUSIQ。行标签/表头带指标名时，差值只在该指标的数值里找。
+    """
+    out: dict[str, list[list[float]]] = {}
+
+    def add(name: str, nums: list[float]) -> None:
+        if len(nums) >= 2:
+            out.setdefault(name, []).append(nums)
+
+    for item in items:
+        extra = getattr(item, "extra", {}) or {}
+        for table in extra.get("tables") or []:
+            header = [str(c) for c in (table.get("header") or [])]
+            rows = [[str(c) for c in (row or [])] for row in (table.get("rows") or [])]
+            for row in rows:
+                name = _metric_name(" ".join(row[:2]))
+                if name:
+                    add(name, [n for cell in row[1:] for n in _cell_numbers(cell)])
+            for ci, cell in enumerate(header):
+                name = _metric_name(cell)
+                if not name:
+                    continue
+                add(name, [n for row in rows if ci < len(row)
+                           for n in _cell_numbers(row[ci])])
+    return out
+
+
+def _explained_by_material(tok: str, pool: set[str],
+                           groups: list[tuple[set[float], list[list[float]]]],
+                           scoped: list[list[float]] | None = None) -> bool:
+    """素材原值、原值的舍入、同一张表同行同列（或同一句）两数之差，都算可核对。"""
+    if tok in pool:
+        return True
+    try:
+        target = float(tok)
+    except ValueError:
+        return False
+    decimals = len(tok.split(".")[1])
+    for values, lines in groups:
+        if any(round(n, decimals) == target for n in values):
+            return True
+    if scoped:
+        return any(round(abs(a - b), decimals) == target
+                   for line in scoped for i, a in enumerate(line) for b in line[i + 1:])
+    for _values, lines in groups:
+        for line in lines:
+            if any(round(abs(a - b), decimals) == target
+                   for i, a in enumerate(line) for b in line[i + 1:]):
+                return True
+    return False
+
+
+def unsupported_prose_numbers(spec: dict, items: list) -> list[str]:
+    """03/04 节正文里对不上素材的小数（实测多为模型算错的差值，如 2.78 写成 2.81）。"""
+    pool = material_number_pool(items)
+    groups = _material_number_groups(items)
+    metric_lines = _metric_lines(items)
+    bad: list[str] = []
+    in_evidence = False
+    for block in spec.get("sections") or []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        text = str(block.get("text") or "")
+        if kind in ("h2", "h3"):
+            in_evidence = bool(_EVIDENCE_HEAD_RE.match(text.strip()))
+            continue
+        if not in_evidence or kind == "table":
+            continue
+        blob = text + " " + " ".join(str(x) for x in (block.get("items") or []))
+        metrics = [(m.start(), m.group(0).upper()) for m in _METRIC_RE.finditer(blob)]
+        for m in _PROSE_NUM_RE.finditer(blob):
+            tok = m.group(0)
+            if tok in bad:
+                continue
+            name = ""
+            for pos, label in metrics:
+                if pos >= m.start():
+                    break
+                name = label
+            if not _explained_by_material(tok, pool, groups, metric_lines.get(name)):
+                bad.append(tok)
+    return bad
+
+
+def quant_retry_instruction(bad_numbers: list[str], has_material: bool = True) -> str:
+    """二次重写的附加指令：缺数值证据 / 表格里编了数字 / 素材本就没有数字。"""
+    if not has_material:
+        return NO_NUMERIC_RETRY
+    if not bad_numbers:
+        return QUANT_RETRY
+    return QUANT_RETRY + (
+        "\n5) 上一稿的实验解读里出现了素材中不存在的数字（"
+        + "、".join(bad_numbers[:8])
+        + "），这些是编造的。表格只能照抄素材 tables 里的单元格；正文只能用素材原值，"
+        "差值要拿素材同一张表里的两个数逐位相减并核对，凑不出就并列两个原始数字、不要硬写差值。"
+    )
+
 
 
 def _item_payload(index: int, item, figure_ids: list[str]) -> dict:
@@ -177,6 +466,16 @@ def _item_payload(index: int, item, figure_ids: list[str]) -> dict:
         payload["platform"] = item.extra["platform"]
     if item.extra.get("figure_caption"):
         payload["figure_caption"] = item.extra["figure_caption"]
+    if item.extra.get("figure_caption_2"):
+        payload["figure_caption_2"] = item.extra["figure_caption_2"]
+    tables = item.extra.get("tables") or []
+    if tables:
+        payload["tables"] = tables[:3]
+    snippets = item.extra.get("result_snippets") or []
+    if snippets:
+        payload["result_snippets"] = snippets
+    if item.extra.get("days_left") is not None:
+        payload["days_left"] = item.extra["days_left"]
     return payload
 
 
