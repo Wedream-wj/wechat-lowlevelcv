@@ -133,6 +133,32 @@ def seen_fingerprints(module: str, days: int = 60) -> set[str]:
     return {r["fingerprint"] for r in rows}
 
 
+def recent_history_titles(module: str, days: int = 90, limit: int = 300) -> list[str]:
+    """读「最近出稿」的历史记录，返回近期各期选用素材的标题列表。
+
+    归档机制：save_article 每次成功成稿都会把当期全部素材（含标题、URL、
+    arXiv id 等）写进 issues.items_json——这里就是去重比对的记录源，
+    无需额外维护一份历史文件。
+    """
+    titles: list[str] = []
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT items_json FROM issues WHERE module=? AND created_at >= datetime('now', ?)"
+            " ORDER BY created_at DESC LIMIT ?",
+            (module, f"-{days} days", limit),
+        ).fetchall()
+    for row in rows:
+        try:
+            entries = json.loads(row["items_json"] or "[]")
+        except (ValueError, TypeError):
+            continue
+        for entry in entries if isinstance(entries, list) else []:
+            title = str((entry or {}).get("title") or "").strip()
+            if title:
+                titles.append(title)
+    return titles
+
+
 def recent_items(module: str, limit: int = 50, unused_only: bool = False) -> list[Item]:
     sql = "SELECT payload FROM items WHERE module=?"
     if unused_only:
@@ -212,6 +238,13 @@ def update_article_status(issue_id: str, status: str, media_id: str = "", error:
             "UPDATE issues SET status=?, wx_media_id=?, error=? WHERE issue_id=?",
             (status, media_id, error, issue_id),
         )
+
+
+def delete_article(issue_id: str) -> bool:
+    """删除一期稿件记录。返回是否真的删了（不存在返回 False），调用方决定要不要 404。"""
+    with _lock, connect() as conn:
+        cur = conn.execute("DELETE FROM issues WHERE issue_id=?", (issue_id,))
+        return cur.rowcount > 0
 
 
 def list_articles(module: str | None = None, limit: int = 30) -> list[dict]:

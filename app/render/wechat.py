@@ -295,6 +295,36 @@ def divider() -> str:
     )
 
 
+def _code_html(code: str) -> str:
+    """代码原文 → 公众号安全的 HTML：换行用 <br />，行首缩进用 &nbsp; 保真。
+
+    公众号编辑器不可靠地保留 white-space:pre-wrap，靠标签硬保换行与缩进。
+    """
+    lines = []
+    for line in esc(code.replace("\t", "    ")).split("\n"):
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        lines.append("&nbsp;" * indent + stripped)
+    return "<br />".join(lines)
+
+
+def code_block(block: dict) -> str:
+    code = str(block.get("code") or "").rstrip()
+    caption = str(block.get("caption") or block.get("lang") or "代码")
+    if not code:
+        return ""
+    return (
+        f'<section style="margin:22px 0;border:1px solid #2A3040;border-radius:8px;'
+        f'overflow:hidden;">'
+        f'<section style="padding:7px 14px;background:#262C3A;font-size:11px;color:#9FB0D0;'
+        f'letter-spacing:1px;font-family:Menlo,Consolas,monospace;line-height:1.6;">'
+        f"{esc(caption)}</section>"
+        f'<section style="padding:14px 16px;background:#14181F;'
+        f'font-family:Menlo,Consolas,monospace;font-size:12.5px;line-height:1.75;'
+        f'color:#DCE3F0;word-break:break-all;">{_code_html(code)}</section></section>'
+    )
+
+
 def footer(spec: dict, module: str) -> str:
     takeaway = spec.get("takeaway") or ""
     block = ""
@@ -370,6 +400,8 @@ def render_body(spec: dict, figures: dict[str, dict], module: str, date_str: str
             parts.append(table(block.get("header") or [], block.get("rows") or []))
         elif btype == "contest_card":
             parts.append(contest_card(block))
+        elif btype == "code":
+            parts.append(code_block(block))
         elif btype == "divider":
             parts.append(divider())
     parts.append(footer(spec, module))

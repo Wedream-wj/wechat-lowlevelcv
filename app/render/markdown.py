@@ -67,6 +67,12 @@ def spec_to_markdown(spec: dict, figures: dict[str, dict]) -> str:
             if block.get("desc"):
                 out += ["", str(block["desc"])]
             out.append("")
+        elif btype == "code":
+            caption = block.get("caption") or ""
+            lang = block.get("lang") or "python"
+            if caption:
+                out += [f"**{caption}**", ""]
+            out += [f"```{lang}", str(block.get("code", "")).rstrip(), "```", ""]
         elif btype == "divider":
             out += ["---", ""]
 

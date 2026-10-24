@@ -49,6 +49,8 @@
     padding:9px 13px;font-size:12.5px;cursor:pointer;transition:.16s;font-family:inherit;}
   button:hover{border-color:#C9D2F5;transform:translateY(-1px);}
   button.primary{background:var(--primary);border-color:var(--primary);color:#fff;font-weight:600;}
+  button.danger{color:#C0392B;border-color:#F0C7C2;}
+  button.danger:hover{background:#FDF1EF;border-color:#C0392B;}
   button.ghost{background:transparent;}
   button:disabled{opacity:.5;cursor:not-allowed;transform:none;}
 
@@ -177,6 +179,7 @@
       </div>
       <div class="actions">
         <button class="primary" onclick="run('contest', this)">生成一期</button>
+        <button onclick="run('contest', this, {variant:'baseline'})">生成 baseline 精读</button>
         <button onclick="openPrompt('contest')">看 Prompt</button>
       </div>
       <div class="runbox" id="runbox-contest" hidden>
@@ -284,6 +287,7 @@ function renderIssues(list){
         <a href="/preview/${x.issue_id}" target="_blank"><button>预览</button></a>
         <button onclick="copyMarkdown('${x.issue_id}')">复制 MD</button>
         <button onclick="pushIssue('${x.issue_id}', this)">推草稿</button>
+        <button class="danger" onclick="deleteIssue('${x.issue_id}', this)">删除</button>
       </div>
     </div>`).join("");
 }
@@ -319,11 +323,11 @@ function resetRunbox(module){
   return ui;
 }
 
-async function run(module, btn){
+async function run(module, btn, extra){
   const ui = resetRunbox(module);
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = "生成中…";
-  log(`开始生成「${MODULE_LABEL[module]}」，抓取 + 成稿通常需要 1–3 分钟…`);
+  log(`开始生成「${MODULE_LABEL[module]}${extra && extra.variant ? " · baseline 精读" : ""}」，抓取 + 成稿通常需要 1–3 分钟…`);
   const startedAt = Date.now();
   ui.elapsed.textContent = "0s";
   const timer = setInterval(()=>{
@@ -331,7 +335,8 @@ async function run(module, btn){
   }, 1000);
   try{
     const r = await fetch(`/api/run/${module}`, {
-      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({})
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(extra || {})
     });
     if(!r.ok){ throw new Error(await r.text()); }
     const {job_id} = await r.json();
@@ -471,6 +476,22 @@ async function pushIssue(id, btn){
     if(/白名单|40164|无权限|48001|Secret/.test(e.message)){
       wechatCheck(document.querySelector(".section-title .ghost"));
     }
+  }finally{ btn.disabled = false; }
+}
+
+async function deleteIssue(id, btn){
+  if(!confirm(`确定删除本地草稿 ${id} 吗？\n\n将删除：数据库记录 + 本地的 .md / .html / 预览页。\n已推入公众号草稿箱的内容不受影响，且此操作不可恢复。`)) return;
+  btn.disabled = true;
+  try{
+    const r = await fetch(`/api/issues/${id}`, {method:"DELETE"});
+    const d = await r.json();
+    if(!r.ok){ throw new Error(d.detail || d.error || "删除失败"); }
+    toast("本地草稿已删除");
+    log(`已删除本地草稿：${id}（${(d.removed_files||[]).join(", ") || "仅数据库记录"}）`);
+    loadIssues();
+  }catch(e){
+    log("删除失败：" + e.message);
+    toast("删除失败：" + e.message);
   }finally{ btn.disabled = false; }
 }
 

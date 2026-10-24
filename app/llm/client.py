@@ -132,7 +132,7 @@ def validate_spec(spec: dict) -> dict:
     if not isinstance(sections, list) or not sections:
         raise LLMError("缺少 sections")
     allowed = {"h2", "h3", "p", "bullets", "numbered", "quote", "highlight", "meta_card",
-               "figure", "table", "contest_card", "divider"}
+               "figure", "table", "contest_card", "code", "divider"}
     cleaned: list[dict] = []
     for block in sections:
         if not isinstance(block, dict):
@@ -145,6 +145,8 @@ def validate_spec(spec: dict) -> dict:
         if btype in {"bullets", "numbered"} and not block.get("items"):
             continue
         if btype == "meta_card" and not block.get("rows"):
+            continue
+        if btype == "code" and not str(block.get("code", "")).strip():
             continue
         cleaned.append(block)
     if not cleaned:
@@ -280,13 +282,13 @@ class LLMClient:
 
     async def write(self, module: str, items: list[Item], figures: dict[str, dict], date_str: str,
                     on_progress: Callable[[str, int], None] | None = None,
-                    extra_instruction: str = "") -> dict:
+                    extra_instruction: str = "", variant: str | None = None) -> dict:
         if not self.enabled:
             from .mock import mock_spec
 
-            return mock_spec(module, items, figures)
+            return mock_spec(module, items, figures, variant=variant)
 
-        user_prompt = build_user_prompt(module, items, figures, date_str)
+        user_prompt = build_user_prompt(module, items, figures, date_str, variant=variant)
         if extra_instruction:
             user_prompt += "\n\n【本次必须修正】\n" + extra_instruction
         messages = [

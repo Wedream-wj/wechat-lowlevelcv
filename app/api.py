@@ -112,7 +112,8 @@ async def prompt(module: str) -> dict:
     return {"module": module, "prompt": PROMPTS[module]}
 
 
-async def _run_job(job_id: str, module: str, publish: bool | None, top_n: int | None) -> None:
+async def _run_job(job_id: str, module: str, publish: bool | None, top_n: int | None,
+                   variant: str | None = None) -> None:
     job = JOBS[job_id]
     job.update({"status": "running", "started_at": datetime.now().isoformat()})
     # 进度与里程碑事件由 run_module 的回调实时写入，前端每 1.5s 轮询展示
@@ -132,7 +133,8 @@ async def _run_job(job_id: str, module: str, publish: bool | None, top_n: int | 
                 del job["events"][: len(job["events"]) - 200]
 
     try:
-        result = await run_module(module, publish=publish, top_n=top_n, progress=on_progress)
+        result = await run_module(module, publish=publish, top_n=top_n, variant=variant,
+                                  progress=on_progress)
         if result.article:
             job.update({
                 "status": "done",
@@ -166,7 +168,8 @@ async def run(module: str, request: Request, background: BackgroundTasks) -> dic
         pass
     job_id = uuid.uuid4().hex[:10]
     JOBS[job_id] = {"status": "queued", "module": module, "created_at": datetime.now().isoformat()}
-    background.add_task(_run_job, job_id, module, body.get("publish"), body.get("top_n"))
+    background.add_task(_run_job, job_id, module, body.get("publish"), body.get("top_n"),
+                        body.get("variant"))
     return {"job_id": job_id, "module": module}
 
 
@@ -220,6 +223,33 @@ async def markdown(issue_id: str) -> Response:
     if not path.exists():
         raise HTTPException(404, "Markdown 不存在，请先生成")
     return Response(path.read_text(encoding="utf-8"), media_type="text/markdown; charset=utf-8")
+
+
+@app.delete("/api/issues/{issue_id}")
+async def delete_issue(issue_id: str, request: Request) -> dict:
+    """删除本地草稿：数据库记录 + 本地三个产物文件（md / html / preview）。
+
+    封面图按「模块+日期」命名、可能被同天多期复用，不在此清理。
+    已推送进微信草稿箱的内容不受影响——这里只管本地。
+    """
+    _check_admin(request)
+    # 与 /markdown 同款防护：期号只接受纯文件名，挡住目录穿越
+    if Path(issue_id).name != issue_id or issue_id in {".", ".."}:
+        raise HTTPException(404, "期号不合法")
+    if not db.get_article(issue_id):
+        raise HTTPException(404, "期号不存在")
+    removed: list[str] = []
+    for name in (f"{issue_id}.md", f"{issue_id}.html", f"preview_{issue_id}.html"):
+        path = settings.out_dir / name
+        try:
+            path.unlink()
+            removed.append(name)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise HTTPException(500, f"删除 {name} 失败：{exc}") from exc
+    db.delete_article(issue_id)
+    return {"ok": True, "issue_id": issue_id, "removed_files": removed}
 
 
 @app.post("/api/issues/{issue_id}/push")

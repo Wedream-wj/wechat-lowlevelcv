@@ -23,6 +23,9 @@ COLLECTORS: dict[str, list[tuple[str, Collector]]] = {
     ],
     "contest": [
         ("赛事聚合", competitions.fetch),
+        # 独立源而非塞在 fetch() 里拼：失败/限流要进 collect() 的源告警，
+        # 让运营看见「baseline 源 0 条」，而不是静默吞掉后让筛选层报出误导性错误
+        ("Datawhale baseline", competitions.fetch_baseline),
     ],
 }
 
@@ -33,7 +36,8 @@ SOURCE_TIMEOUTS: dict[str, float] = {
     "Papers With Code": 40.0,
     "RSS 订阅": 60.0,
     "GitHub 开源": 60.0,
-    "赛事聚合": 90.0,
+    "赛事聚合": 120.0,
+    "Datawhale baseline": 45.0,
 }
 
 MODULE_LABEL = {"paper": "学术论文", "industry": "业界进展", "contest": "赛事竞赛"}

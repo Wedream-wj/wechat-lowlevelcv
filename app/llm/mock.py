@@ -140,12 +140,89 @@ def _sota_gap_text(table: dict | None) -> str:
     )
 
 
-def mock_spec(module: str, items: list[Item], figures: dict[str, dict]) -> dict:
+def _desc(text: str, limit: int = 200) -> str:
+    """卡片简介按句界截断：固定字符数硬切会把句子拦腰斩断，读者看到半句话。"""
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    pos = max(cut.rfind("。"), cut.rfind("！"), cut.rfind("？"))
+    if pos >= 40:
+        return cut[:pos + 1]
+    # 前段没有句末标点就退到逗号边界，断口补省略号示意有后文
+    pos = max(cut.rfind("，"), cut.rfind("、"), cut.rfind(" "))
+    return cut[:pos].rstrip() + "…" if pos >= 40 else cut.rstrip() + "…"
+
+
+def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
+              variant: str | None = None) -> dict:
     """把素材机械地组织成 ArticleSpec，不生成任何素材之外的数字。"""
     if not items:
         raise ValueError("mock_spec 需要至少一条素材")
     main = items[0]
     date_str = date.today().strftime("%Y.%m.%d")
+
+    if module == "contest" and variant == "baseline":
+        # 变体：整篇「竞赛 baseline 精读」的离线占位稿（只讲原赛题与 baseline 解法）
+        base_item = next((i for i in items if i.extra.get("is_learning_resource")), None)
+        if base_item is None:
+            base_item = main
+        detail = (base_item.extra.get("baseline_detail") or {}) if base_item else {}
+        files = [f for f in (detail.get("files") or []) if f][:8]
+        samples = [s for s in (detail.get("code_samples") or []) if s.get("code")][:1]
+        readme = detail.get("readme_excerpt") or ""
+        hint = detail.get("paradigm_hint") or ""
+        sections: list[dict] = [
+            {"type": "meta_card", "rows": [
+                ["原赛题", base_item.title],
+                ["任务类型", base_item.category or "计算机视觉"],
+                ["baseline 仓库", base_item.url],
+            ]},
+            {"type": "h2", "text": "01 | 数据分布与赛题痛点速览"},
+            {"type": "p", "text": _desc(readme or hint, 300)
+             or "聚焦数据洞察与基础框架：本赛题的核心在于吃透数据分布与评测口径，"
+                "该 Baseline 重点解决了数据处理的确定性底座。"},
+            {"type": "h2", "text": "02 | baseline 亮点提炼（含关键代码解读）"},
+        ]
+        if base_item:
+            sections.append({"type": "p",
+                             "text": f"参考复现：{base_item.title}（{base_item.url}）。"
+                                     f"该 Baseline 聚焦于基础框架与数据洞察，"
+                                     f"为后续模型迭代留下了极大的调优空间。"})
+            if files:
+                sections.append({"type": "bullets", "items": [f"`{f}`" for f in files]})
+        else:
+            sections.append({"type": "p", "text": "本期未匹配到可用的 baseline 复现素材。"})
+        if readme:
+            sections.append({"type": "quote", "text": _desc(readme, 240)})
+        sections.append({"type": "h2", "text": "03 | 专业级升级 Roadmap"})
+        if samples:
+            sections.append({
+                "type": "code", "lang": "python",
+                "caption": f"{samples[0].get('name', 'code.py')}（节选）",
+                "code": samples[0]["code"],
+            })
+        sections += [
+            {"type": "h3", "text": "特征工程"},
+            {"type": "bullets", "items": [
+                "Target Encoding 与聚合统计优先，收益直接。",
+                "交叉特征与时序滑动窗口对齐业务口径。",
+            ]},
+            {"type": "h3", "text": "模型选择"},
+            {"type": "p", "text": "LightGBM / XGBoost / CatBoost 三件套起步，数据规模与模态合适时再上深度模型。"},
+            {"type": "h3", "text": "交叉验证策略"},
+            {"type": "p", "text": "分类用 StratifiedKFold，分组字段用 GroupKFold，含时间字段用时序滚动切分。"},
+        ]
+        return {
+            "title": f"{(base_item.title or '竞赛 baseline')[:24]}｜baseline 精读",
+            "subtitle": f"{date_str} · 一份往届 baseline 的数据洞察与升级路线",
+            "digest": "自动占位稿：验证「竞赛 baseline 精读」链路与排版。",
+            "lead": ["本篇为 baseline 精读变体的离线占位稿，用于验证抓取与排版链路。",
+                     "配置大模型后将输出完整的数据洞察、代码解读与专业升级 Roadmap。"],
+            "sections": sections,
+            "takeaway": "数据洞察型 baseline 的价值在于把调优空间讲清楚——先借鉴其数据结论，再按 Roadmap 迭代升级。",
+            "sources": [{"name": base_item.title, "url": base_item.url}],
+        }
 
     if module == "paper":
         raw_title = main.extra.get("title_zh") or main.title
@@ -260,19 +337,6 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict]) -> dict:
         if isinstance(days, int) and days >= 0:
             return f"{m.group(0)}（剩 {days} 天）"
         return m.group(0)
-
-    def _desc(text: str, limit: int = 200) -> str:
-        """卡片简介按句界截断：固定字符数硬切会把句子拦腰斩断，读者看到半句话。"""
-        text = re.sub(r"\s+", " ", (text or "").strip())
-        if len(text) <= limit:
-            return text
-        cut = text[:limit]
-        pos = max(cut.rfind("。"), cut.rfind("！"), cut.rfind("？"))
-        if pos >= 40:
-            return cut[:pos + 1]
-        # 前段没有句末标点就退到逗号边界，断口补省略号示意有后文
-        pos = max(cut.rfind("，"), cut.rfind("、"), cut.rfind(" "))
-        return cut[:pos].rstrip() + "…" if pos >= 40 else cut.rstrip() + "…"
 
     pool = items[:4]
     # 底层视觉类目命中数：全部命中才用「底层视觉赛事」措辞；零命中说明本期在办

@@ -72,6 +72,7 @@ SPEC_GUIDE = """
 {"type":"figure", "ref":"F1", "caption":"图 1：整体架构。左边是…"}
 {"type":"table", "header":["方法","PSNR↑","LPIPS↓"], "rows":[["Ours","32.1","0.21"]]}
 {"type":"contest_card", "name":"赛事名", "track":"赛题方向", "prize":"奖金池", "deadline":"报名/截止", "entry":"入口链接", "desc":"一句话点评"}
+{"type":"code", "lang":"python", "caption":"train.py · 训练主循环", "code":"代码原文（原样粘贴，不得改写）"}
 {"type":"divider"}
 
 篇幅：论文 1800–2600 字；业界 1400–2000 字；竞赛 900–1400 字（不含表格）。
@@ -166,9 +167,97 @@ CONTEST_PROMPT = """
 - 每条赛事必须给出「赛题方向」，不能只写名称。
 - 难度判断要说明依据（数据规模、是否有 baseline、往届参赛人数）。
 - 入口链接原样保留，方便读者直接点。
+- 素材里的 category=学习资源 条目（往届 baseline 仓库）**不属于本期赛事速递**：
+  不要写进赛事列表、时间线表格或任何小节；它们由独立的「baseline 精读」成稿变体处理。
 """ + FACT_RULES + SPEC_GUIDE
 
-PROMPTS = {"paper": PAPER_PROMPT, "industry": INDUSTRY_PROMPT, "contest": CONTEST_PROMPT}
+# ---------------------------------------------------------------- 模块 C 变体：竞赛 baseline 精读
+CONTEST_BASELINE_PROMPT = """
+【任务】写一篇「竞赛 baseline 精读」，发在「底层视觉论文笔记」。
+你是常年在各大数据竞赛刷进前十的竞赛 Grandmaster，正以专业选手带练的视角，
+拆解一份往届竞赛的开源 baseline 复现：它的数据洞察、值得借鉴的代码亮点，
+以及从这份起点往上打的专业升级路线。
+读者读完要能回答三个问题：这类赛题的痛点在哪、这份 baseline 有哪些逻辑值得借鉴复用、接下来按什么路线升级。
+
+【重要边界】
+- **不要强行联系当前正在进行的其他赛事**：全文不出现「本场赛事」「正在报名的 XX 赛」这类嫁接，
+  不写报名入口、奖金、截止倒计时。只讲原赛题本身与这份 baseline 的解法。
+- **赛题信息必须查证后确定性撰写**：extra.baseline_detail.search_context 里是联网检索到的
+  赛事官方介绍片段（标题、摘要、链接）。赛题定义、业务背景、评测口径**优先以检索结果为准**，
+  用确定性语气直述；检索结果里的数字可以引用。
+- **严禁任何推测性话术**：「按目录名推断」「按代码推断」「猜测可能为」「大概率是」「应该是」
+  一律禁止，也不得向读者解释「信息是从哪推断来的」。检索与代码证据足以支撑的结论，直接写成事实；
+  检索没覆盖的部分，用「本赛题的核心在于……」「该方案重点解决了……」这类确定性句式补足。
+
+【措辞禁令（最高优先级，逐条硬约束）】
+1. **严禁暴露素材缺陷与代码缺陷**。以下表述一律禁止：
+   「代码没写完」「仓库未完成」「不完整」「只有/仅仅有 EDA」「README 为空/摘录为空/很短」
+   「未注明」「未知」「素材未提供」「素材没写」「无法量化」「信息缺失」「没有给出」「留白」等。
+2. 素材薄、代码基础，一律包装为定位与空间：
+   「该 Baseline 聚焦于基础框架与数据洞察，为后续模型迭代留下了极大的调优空间」这类句式。
+   EDA 为主的仓库要写成「数据洞察型 baseline」，并明确说清这正是它的价值所在——
+   数据结论越扎实，后面的模型迭代越有的放矢。
+3. **严禁推测性词汇**：「按目录名推断」「按代码推断」「推断为」「猜测」「大概率」「可能为」
+   「应该是」「多半是」等一律禁止；赛题定义直接用确定性句式陈述。
+4. **严禁直白粗糙的口语**：「抄走」「套用」「偷懒」「搬运」「白嫖」等一律不用，
+   统一替换为「复用」「借鉴」「参考」「迁移」。对照示例：
+   ❌「先抄走它的数据管道」
+   ✔️「可优先借鉴并迁移其高效的数据处理 Pipeline，在此基础上融入 7/14/28 天滑动窗口统计特征
+   与 LightGBM 模型，并结合时序交叉验证（Time-Series Split）进行效果迭代。」
+5. **严禁露出信息缺失的不确定性**。范式级补足必须落在可执行的专业动作上
+   （指标怎么选、CV 怎么切、特征怎么挖、模型怎么升级），不得写成空洞的免责声明。
+6. 唯一保留的数字纪律：**具体数字（样本量、成绩、名次、超参数值）只能来自素材或检索结果**，
+   不得编造；范式建议里的方法名（LightGBM、StratifiedKFold 等）不是数字，可以写。
+
+【素材说明】
+- 素材只有一条 category=学习资源 条目：Datawhale「竞赛Baseline」开源仓库里的一个赛题目录。
+  extra.baseline_detail 里有：
+  * files：仓库文件清单（真实文件名）；
+  * readme_excerpt：README 摘录（可能很短——此时以 search_context 的检索结果为准，通篇不要提 README）；
+  * code_samples：仓库代码文件的真实片段（[{name, code}]，notebook 已抽取 code cell）；
+  * search_context：联网检索到的赛事官方介绍片段（赛题定义、业务背景的事实依据）；
+  * paradigm_hint：范式级背景提示（检索没覆盖时的补足参考）。
+- code_samples 是代码解读的核心素材：正文至少用 1 个 code 块原样粘贴片段（最多 3 个），
+  逐段讲解；code 素材里没有的代码不要凭空编造。
+- EDA notebook 的代码（describe / value_counts / groupby / 可视化）本身就是数据分布结论的来源：
+  从这些代码提炼数据特征（字段类型、类别数、不平衡程度、时序/空间属性），用确定性语言写进 01 节。
+
+【结构建议】
+1. lead（2 段）：第一段以确定性语气点出这份 baseline 对应的原赛题
+   （赛题定义与业务背景以 search_context 为准直述），以及为什么值得读一份基础型 baseline——
+   起点越干净，调优路线越清晰；第二段预告本文路线：数据痛点 → baseline 亮点 → 升级 Roadmap。
+2. meta_card：信息卡（原赛题、赛事平台、任务类型、baseline 仓库、代码入口）。
+   任务类型等字段按检索结果与代码证据确定性填写，不写「推断」字样。
+3. h2 "01 | 数据分布与赛题痛点速览"：用确定性语言总结数据特征（数据类型、字段构成、
+   类别数与不平衡、时序/空间/文本属性、噪声与极值），依据是 EDA 代码与检索到的赛题信息；
+   随后点出这类赛题的通用痛点（指标陷阱、分布漂移、样本不平衡）。
+4. h2 "02 | baseline 亮点提炼（含关键代码解读）"：萃取现有 EDA / 数据清洗 / 特征工程 /
+   训练框架里值得借鉴与复用的逻辑；code 块原样粘贴 code_samples 片段（单个不超过 30 行，
+   超长取连续节选并注明「节选」），每段代码**前**写清它处于流程哪一步，**后**写清
+   它在做什么、为什么这么写、改动空间在哪。
+5. h2 "03 | 专业级升级 Roadmap"：核心干货段，三条线展开（用 h3 分小节）：
+   * 特征工程：具体到手法——Target Encoding、时序滑动窗口统计、交叉特征、聚合统计、
+     embedding 编码等，结合 01 节的数据特征说哪几招优先、为什么；
+   * 模型选择：从 LightGBM / XGBoost / CatBoost 的表格三件套起步，到何时值得上深度模型，
+     每一级给预期收益与代价；
+   * 交叉验证策略：按数据特征推荐切分（StratifiedKFold / GroupKFold / 时序滚动切分），
+     说清为什么这种切分能对齐线上分布、避免泄漏。
+6. takeaway：一句话判断（这份 baseline 的真正价值 + 第一步升级动作）。
+
+【写作要求】
+- 全文 1600–2400 字（不含代码），技术密度优先；通篇「专业选手带练」口吻，有判断、有优先级。
+- 不得罗列仓库目录；要解释每个组件为什么在那。
+- 不要写「本文将介绍」这类废话，直接开讲。
+""" + FACT_RULES + """
+【本变体措辞修正（优先级高于上方事实纪律的措辞条款）】
+- 「不确定的信息写『官方未公布/仓库未注明』」这条在本变体中停用：改以 search_context 检索结果
+  与确定性句式补足，通篇不得出现「未公布/未注明/未知/推断/猜测/大概率/抄走/套用」等任何一种。
+- 数字纪律保留：素材与检索结果里都没有的具体数字一个都不要写；范式建议的方法名不是数字，可以写。
+- 成稿里出现「素材未提供/未注明/未知/为空/没写完/不完整/按目录名推断/猜测/抄走」任何一种都算不合格。
+""" + SPEC_GUIDE
+
+PROMPTS = {"paper": PAPER_PROMPT, "industry": INDUSTRY_PROMPT, "contest": CONTEST_PROMPT,
+           "contest_baseline": CONTEST_BASELINE_PROMPT}
 
 MODULE_TITLE = {"paper": "论文精读", "industry": "业界观察", "contest": "赛事速递"}
 # 素材里有数字、成稿却没引用时的补写要求（见 thin_evidence 判定）
@@ -476,11 +565,38 @@ def _item_payload(index: int, item, figure_ids: list[str]) -> dict:
         payload["result_snippets"] = snippets
     if item.extra.get("days_left") is not None:
         payload["days_left"] = item.extra["days_left"]
+    if item.extra.get("is_learning_resource"):
+        payload["is_learning_resource"] = True
+        detail = item.extra.get("baseline_detail") or {}
+        payload["baseline_detail"] = {
+            "files": [f for f in (detail.get("files") or []) if f][:15],
+            "readme_excerpt": (detail.get("readme_excerpt") or "")[:3000],
+        }
+        # README 过短时自动生成的范式推演提示，供成稿做专业推断兜底
+        if detail.get("paradigm_hint"):
+            payload["baseline_detail"]["paradigm_hint"] = str(detail["paradigm_hint"])[:1200]
+        # 联网检索到的赛事官方背景：赛题信息查证后确定性撰写的事实依据
+        ctx = detail.get("search_context") or []
+        if ctx:
+            payload["baseline_detail"]["search_context"] = [
+                {"title": str(c.get("title") or "")[:120],
+                 "snippet": str(c.get("snippet") or "")[:400],
+                 "url": str(c.get("url") or "")}
+                for c in ctx[:4]
+            ]
+        # 关键代码片段是 baseline 精读的核心素材，必须原样传给模型
+        samples = detail.get("code_samples") or []
+        if samples:
+            payload["baseline_detail"]["code_samples"] = [
+                {"name": str(s.get("name") or ""), "code": str(s.get("code") or "")[:2200]}
+                for s in samples[:3] if s.get("code")
+            ]
     return payload
 
 
-def build_user_prompt(module: str, items: list, figures: dict[str, dict], date_str: str) -> str:
-    """把素材整理成模型友好的 JSON，附带图片编号表。"""
+def build_user_prompt(module: str, items: list, figures: dict[str, dict], date_str: str,
+                      variant: str | None = None) -> str:
+    """把素材整理成模型友好的 JSON，附带图片编号表。variant 用于模块内成稿变体。"""
     import json
 
     material = []
@@ -496,12 +612,14 @@ def build_user_prompt(module: str, items: list, figures: dict[str, dict], date_s
     payload = {
         "date": date_str,
         "module": module,
+        "variant": variant or "default",
         "brand": {"name": BRAND_NAME, "slogan": SLOGAN},
         "materials": material,
         "figures": figure_table,
     }
+    prompt_key = f"{module}_{variant}" if (module == "contest" and variant == "baseline") else module
     return (
-        PROMPTS[module]
+        PROMPTS[prompt_key]
         + "\n\n【本期素材】\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
         + "\n\n请严格按上述 JSON 规格输出，只输出 JSON。"

@@ -82,6 +82,33 @@ def _too_similar(title: str, others: Iterable[str], threshold: float = 0.86) -> 
     return False
 
 
+def dedupe_history(
+    items: list[Item],
+    history_titles: Iterable[str],
+    threshold: float = 0.85,
+) -> tuple[list[Item], list[str]]:
+    """把候选与「最近出稿」历史记录做标题相似度比对，挡掉高度相似的条目。
+
+    fingerprint 去重只能拦「同一条素材」（同 URL）；同一篇论文被两个源收录、
+    同一个赛事换了标题后缀、同一份 baseline 改了仓库名——这些 fingerprint
+    不同但内容重复的候选，靠归一化标题的相似度兜底。防重的原则是宁可错杀：
+    推一篇重复的损失远大于漏一篇候选。
+
+    返回 (保留条目, 被挡条目的标题列表)；历史为空时原样返回。
+    """
+    history = [t for t in history_titles if t]
+    if not history:
+        return items, []
+    kept: list[Item] = []
+    dropped: list[str] = []
+    for item in items:
+        if _too_similar(item.title, history, threshold):
+            dropped.append(item.title)
+        else:
+            kept.append(item)
+    return kept, dropped
+
+
 def filter_cfg(topics: Topics, module: str) -> dict:
     """各模块在 topics.yaml 里的筛选参数（select 与漏斗统计共用同一份口径）。"""
     if module == "paper":

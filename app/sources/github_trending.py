@@ -12,12 +12,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 
 from ..config import topics
 from ..filters.scoring import classify_category, score_item
 from ..models import Item
 from .base import HttpClient, SourceError, strip_html
+from .competitions import github_headers
 
 API = "https://api.github.com/search/repositories"
 
@@ -93,7 +95,8 @@ async def fetch(client: HttpClient) -> list[Item]:
     since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
 
     headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
-    token = cfg.get("token") or ""
+    # token 来源：topics.yaml industry.github.token，或环境变量 GITHUB_TOKEN / GH_TOKEN
+    token = cfg.get("token") or os.getenv("GITHUB_TOKEN", "").strip() or os.getenv("GH_TOKEN", "").strip()
     if token:
         headers["Authorization"] = f"Bearer {token}"
 

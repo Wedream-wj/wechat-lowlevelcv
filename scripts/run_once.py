@@ -18,6 +18,8 @@ _parser.add_argument("module", choices=["paper", "industry", "contest"])
 _parser.add_argument("--push", action="store_true", help="成稿后直接推公众号草稿箱")
 _parser.add_argument("--mock", action="store_true", help="离线模式（不调大模型）")
 _parser.add_argument("--top-n", type=int, default=None, help="本次最多选用几条素材")
+_parser.add_argument("--variant", default=None, choices=["baseline"],
+                     help="成稿变体：contest 支持 baseline（整篇赛事×baseline 精读）")
 _args = _parser.parse_args()
 if _args.mock:
     os.environ["LLCV_MOCK_LLM"] = "1"
@@ -26,7 +28,8 @@ from app.pipeline import run_module  # noqa: E402
 
 
 async def main() -> int:
-    result = await run_module(_args.module, publish=_args.push or None, top_n=_args.top_n)
+    result = await run_module(_args.module, publish=_args.push or None, top_n=_args.top_n,
+                              variant=_args.variant)
     if result.article:
         print(f"[ok] {result.article.title}")
         print(f"     预览: {result.stats.get('preview')}")

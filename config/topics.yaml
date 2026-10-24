@@ -252,6 +252,20 @@ competitions:
       - image enhancement
       - computational photography
     max_results: 20
+  datacastle:
+    enabled: true
+    # DC 竞赛在办赛事列表（SPA 背后的 JSON 接口，实测 /v3/api/common/cmpt/cmptIndex.json）
+    # 列表不含奖金/截止时间，成稿时写「待官方公布」
+  coggle:
+    enabled: true
+    # Coggle 数据科学的赛事聚合页（?platform= 可切 xfyun 等）
+    # 部分网络对该站 DNS 阻断，抓不到时自动降级跳过
+    url: https://coggle.club/?platform=xfyun
+  baseline:
+    enabled: true
+    # Datawhale「竞赛Baseline」开源仓库：往届赛题 baseline 复现合集（学习资源，非赛事）
+    # 覆盖深度学习/AI 泛领域（不限于底层视觉）；进精读候选池的数量上限
+    max_items: 30
   tianchi:
     enabled: true
     list_url: https://tianchi.aliyun.com/competition/activeList

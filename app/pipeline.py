@@ -32,6 +32,7 @@ from .render import wechat
 from .render.markdown import spec_to_markdown
 from .render.preview import render_preview
 from .sources import MODULE_LABEL, arxiv, collect
+from .sources import competitions as _competitions
 from .sources.base import HttpClient
 
 DATE_FMT = "%Y.%m.%d"
@@ -111,11 +112,15 @@ def _relative_asset(path: str) -> str:
 
 async def run_module(module: str, *, publish: bool | None = None,
                      date_str: str | None = None, top_n: int | None = None,
-                     demo: bool = False,
+                     demo: bool = False, variant: str | None = None,
                      progress: Callable[..., None] | None = None) -> RunResult:
     """demo=True：走完整抓取/筛选/配图/成稿/渲染链路，但不写库、不记已用、不推送。
 
     用于本地生成演示稿（scripts/demo.py），跑多少次都不影响线上选题与去重。
+
+    variant：成稿变体。目前仅 module="contest" 支持 "baseline"——
+    整篇只围绕一份往届竞赛 baseline 复现展开：讲透它对应的原赛题、解题思路与关键代码，
+    不与当下在办赛事强行关联。
 
     progress(stage, pct, msg, event=False)：可选进度回调（控制台轮询用）。
     只在里程碑处发 event=True；进度回调自身绝不允许把流水线搞挂。
@@ -158,7 +163,69 @@ async def run_module(module: str, *, publish: bool | None = None,
         if not demo:
             db.save_items(items, module)
 
-        selected = scoring.select(items, topics, module, top_n=top_n, seen=seen)
+        # 防重第二道闸：候选标题与「最近出稿」历史记录做相似度比对。
+        # fingerprint 只能拦同一条素材；同一篇论文被两个源收录、同一赛事换了
+        # 标题后缀，会绕过指纹。历史记录由 save_article 自动归档在 issues.items_json。
+        # 学习资源（baseline）是固定小池子，对它硬过滤必然走进「无内容可推」的
+        # 死胡同——所以只做降档（见下方 variant 分支），硬过滤只作用于赛事/论文/业界条目。
+        history_titles = db.recent_history_titles(module, days=90)
+        history_dropped = 0
+        if module == "contest":
+            learning_all = [i for i in items if i.extra.get("is_learning_resource")]
+            contests_all = [i for i in items if not i.extra.get("is_learning_resource")]
+        else:
+            learning_all, contests_all = [], list(items)
+        learning_fresh = learning_all
+        if history_titles:
+            if contests_all:
+                contests_all, dup_contest = scoring.dedupe_history(contests_all, history_titles)
+            else:
+                dup_contest = []
+            if learning_all:
+                learning_fresh, dup_learning = scoring.dedupe_history(learning_all, history_titles)
+            else:
+                dup_learning = []
+            history_dropped = len(dup_contest) + len(dup_learning)
+            dropped_all = dup_contest + dup_learning
+            if dropped_all:
+                _log(f"历史去重：挡掉 {len(dropped_all)} 条与最近出稿相似的候选："
+                     + "；".join(t[:28] for t in dropped_all[:3]))
+        items = contests_all + learning_fresh
+
+        if module == "contest" and variant == "baseline":
+            # 变体：整篇「竞赛 baseline 精读」。只选 baseline 本身，不强行搭配当下赛事。
+            # 三档降级保证永远有稿可出（此前硬过滤曾把固定池清零导致 0 输出）：
+            #   第 1 档：全新 baseline（历史出稿没写过、指纹也没用过）；
+            #   第 2 档：与历史出稿相似但本条指纹未直接用过（如仓库目录改名）；
+            #   第 3 档：全部学习资源兜底（含已用过的——宁可选一条写过的，也不能开天窗）。
+            similar = [i for i in learning_all if i not in learning_fresh]
+
+            def _unused(xs: list[Item]) -> list[Item]:
+                return [i for i in xs if demo or i.fingerprint not in seen]
+
+            tiers = [(1, _unused(learning_fresh)),
+                     (2, _unused(similar)),
+                     (3, sorted(learning_all, key=lambda x: (x.fingerprint in seen, -x.score)))]
+            pool = next((xs for _, xs in tiers if xs), [])
+            if pool:
+                main_item = max(pool, key=lambda x: x.score)
+                selected = [main_item]
+                tier = next(no for no, xs in tiers if any(i is main_item for i in xs))
+                _log(f"baseline 精读选题（第 {tier} 档）：{main_item.title[:40]}（{main_item.score} 分）")
+            else:
+                # 学习素材一条都没抓到（GitHub 限流/网络异常）：明确报因，不回退
+                # 赛事速递——用户点的是「baseline 精读」，静默换内容反而误导
+                raise PipelineError(
+                    "baseline 学习素材抓取到 0 条：Datawhale 仓库接口可能限流"
+                    "（匿名 GitHub API 仅 60 次/小时）或网络异常。稍后重试，"
+                    "或在 .env 配置 GITHUB_TOKEN 提升配额至 5000 次/小时。"
+                )
+        elif module == "contest":
+            # 默认（赛事速递）：学习资源（往届 baseline）不属于赛事内容，不进入本篇——
+            # baseline 解读由独立的成稿变体负责
+            selected = scoring.select(contests_all, topics, module, top_n=top_n, seen=seen)
+        else:
+            selected = scoring.select(items, topics, module, top_n=top_n, seen=seen)
         if not selected:
             # 失败要可读：漏斗说明每层挡了多少，再给最高分候选供运营对照阈值
             funnel = scoring.funnel_stats(items, topics, module, seen=seen)
@@ -167,8 +234,9 @@ async def run_module(module: str, *, publish: bool | None = None,
                 f"{i.title[:32]}（{i.score}分，命中{i.keywords[:3] or '无'}）" for i in top
             ) or "（无候选）"
             raise PipelineError(
-                f"抓到 {len(items)} 条但筛选后为 0。漏斗：{funnel['total']} 条中 "
-                f"已用去重挡 {funnel['seen']}、分数不足挡 {funnel['score']}、"
+                f"抓到 {len(items) + history_dropped} 条但筛选后为 0。漏斗："
+                f"{funnel['total']} 条中已用去重挡 {funnel['seen']}、"
+                f"历史出稿相似挡 {history_dropped}、分数不足挡 {funnel['score']}、"
                 f"关键词未命中挡 {funnel['keywords']}、超期挡 {funnel['freshness']}，"
                 f"通过 {funnel['pass']}。最高分候选：{top_desc}。"
                 f"源告警 {len(errors)} 个。"
@@ -199,6 +267,16 @@ async def run_module(module: str, *, publish: bool | None = None,
                     snippets = len(item.extra.get("result_snippets") or [])
                     _log(f"素材 {item.title[:20]}：表 {tables} 张、数值结论 {snippets} 条")
             report("配图", 42, "下载与整理配图…", True)
+            # baseline 精读变体：给学习资源条目补 README 摘录与文件清单（成稿的核心素材）
+            if module == "contest" and variant == "baseline":
+                res_item = next((i for i in selected if i.extra.get("is_learning_resource")), None)
+                if res_item and res_item.extra.get("folder"):
+                    report("配图", 44, "拉取 baseline 仓库的 README 与文件清单…", True)
+                    detail = await _competitions.fetch_baseline_detail(
+                        client, res_item.extra["folder"])
+                    res_item.extra["baseline_detail"] = detail
+                    _log(f"baseline 详情：files {len(detail.get('files') or [])} 个，"
+                         f"README 摘录 {len(detail.get('readme_excerpt') or '')} 字")
             figures = await build_figures(client, selected, module)
         _log(f"配图 {len(figures)} 张")
         report("配图", 48, f"配图完成：{len(figures)} 张", True)
@@ -218,7 +296,8 @@ async def run_module(module: str, *, publish: bool | None = None,
                     report("成稿", min(70 + int(n * 15 / 6000), 85),
                            f"模型写作中… 已输出约 {n} 字符")
 
-            spec = await llm.write(module, selected, figures, date_str, on_progress=on_llm)
+            spec = await llm.write(module, selected, figures, date_str, on_progress=on_llm,
+                                   variant=variant if module == "contest" else None)
             # 表格里的数字必须能在素材里找到；素材里一个数字都没有时，出现表格更是编的。
             # 素材有数据却写成「无法量化」也要补写。
             if module == "paper" and llm.enabled:
@@ -255,7 +334,7 @@ async def run_module(module: str, *, publish: bool | None = None,
                 from .llm.mock import mock_spec
 
                 _log(f"大模型成稿失败，已降级 mock 出稿（正式运行会在此报错）：{exc}")
-                spec = mock_spec(module, selected, figures)
+                spec = mock_spec(module, selected, figures, variant=variant)
                 llm_mode = "mock（live 失败降级）"
             else:
                 raise PipelineError(f"大模型成稿失败：{exc}") from exc
