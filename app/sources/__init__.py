@@ -7,7 +7,8 @@ from typing import Awaitable, Callable
 
 from ..models import Item
 from .base import HttpClient
-from . import arxiv, competitions, github_trending, industry, lowlevelcv, paperswithcode
+from . import (arxiv, awesome_llv, chinese_media, competitions, github_trending, industry,
+               lowlevelcv, paperswithcode)
 
 Collector = Callable[[HttpClient], Awaitable[list[Item]]]
 
@@ -16,9 +17,14 @@ COLLECTORS: dict[str, list[tuple[str, Collector]]] = {
         ("熵视 lowlevelcv", lowlevelcv.fetch),
         ("arXiv", arxiv.fetch),
         ("Papers With Code", paperswithcode.fetch),
+        # 经典池：CVPR2020–2026 底层视觉全景清单，解除「仅限最新论文」限制
+        ("Awesome 经典合集", awesome_llv.fetch),
     ],
     "industry": [
         ("RSS 订阅", industry.fetch),
+        # 中文产业媒体直连：RSSHub 公共实例在本机网络被拦，公众号线索靠这两路
+        ("量子位", chinese_media.fetch_qbitai),
+        ("HackCV", chinese_media.fetch_hackcv),
         ("GitHub 开源", github_trending.fetch),
     ],
     "contest": [
@@ -34,7 +40,10 @@ SOURCE_TIMEOUTS: dict[str, float] = {
     "熵视 lowlevelcv": 60.0,
     "arXiv": 75.0,
     "Papers With Code": 40.0,
+    "Awesome 经典合集": 90.0,
     "RSS 订阅": 60.0,
+    "量子位": 45.0,
+    "HackCV": 60.0,
     "GitHub 开源": 60.0,
     "赛事聚合": 120.0,
     "Datawhale baseline": 45.0,

@@ -74,7 +74,7 @@ class TestWeChatRender(unittest.TestCase):
         self.assertIn("assets/demo_arch.png", html)
         self.assertIn("SECTION 01", html)
         self.assertIn("PAPER INFO", html)
-        self.assertIn("写在最后", html)
+        self.assertIn("一句话总结", html)
 
     def test_escape(self):
         html = wechat.render_body({"title": "T", "lead": ["<script>alert(1)</script>"],
@@ -327,3 +327,27 @@ class TestSafeDownload(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSummaryMutex(unittest.TestCase):
+    """「总结」节与「核心结论」highlight 互斥的代码级强制。"""
+
+    def test_dropped_when_summary_present(self):
+        from app.llm.prompts import drop_redundant_summary
+        spec = {"sections": [
+            {"type": "h2", "text": "05 | 总结"},
+            {"type": "highlight", "title": "核心结论", "text": "x"},
+            {"type": "highlight", "title": "避坑提醒", "text": "y"},
+        ]}
+        self.assertTrue(drop_redundant_summary(spec))
+        titles = [b.get("title") for b in spec["sections"] if b.get("type") == "highlight"]
+        self.assertEqual(titles, ["避坑提醒"])
+
+    def test_kept_when_no_summary(self):
+        from app.llm.prompts import drop_redundant_summary
+        spec = {"sections": [
+            {"type": "h2", "text": "04 | 与 SOTA 的对比与分析"},
+            {"type": "highlight", "title": "核心结论", "text": "x"},
+        ]}
+        self.assertFalse(drop_redundant_summary(spec))
+        self.assertEqual(len(spec["sections"]), 2)

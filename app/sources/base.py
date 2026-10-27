@@ -20,6 +20,7 @@ import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from ..config import settings, topics
+from ..imaging import WECHAT_EXTS, normalize
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -128,6 +129,14 @@ class HttpClient:
         ext = mimetypes.guess_extension(ctype) or Path(url.split("?")[0]).suffix or ".jpg"
         if ext == ".jpe":
             ext = ".jpg"
+        # 微信草稿箱只吃 jpg/png：webp/avif/gif 在落盘时就转掉，
+        # 否则预览页正常、推草稿时才在 uploadimg 上炸（40005 invalid file type）
+        if ext.lower() not in WECHAT_EXTS:
+            try:
+                data, ext, _ = normalize(data, max_bytes=MAX_IMAGE_BYTES,
+                                         filename=f"x{ext}")
+            except ValueError:
+                return ""
         path = settings.image_dir / f"{digest}{ext}"
         path.write_bytes(data)
         return str(path)

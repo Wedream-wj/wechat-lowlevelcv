@@ -334,3 +334,21 @@ class LLMClient:
                     f"{meta2['reasoning_chars']} 字符 / finish={meta2.get('finish')} / "
                     f"耗时 {meta2['seconds']}s）"
                 ) from exc
+
+    async def rewrite_title(self, spec: dict, featured_item) -> str | None:
+        """跑分型标题的定向重写：只重出标题（几十 token），失败返回 None 保留原题。
+
+        与整篇重写不同，标题重写足够便宜，可以在成稿后按检测结果随时触发。
+        """
+        if not self.enabled:
+            return None
+        from .prompts import build_title_rewrite_messages
+
+        raw, _meta = await self._chat(build_title_rewrite_messages(spec, featured_item))
+        usage.add("paper-title", _meta["prompt"], _meta["completion"])
+        try:
+            data = extract_json(raw)
+            title = str(data.get("title") or "").strip()
+            return title or None
+        except LLMError:
+            return None

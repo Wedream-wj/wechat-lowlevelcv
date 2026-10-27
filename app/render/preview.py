@@ -53,7 +53,7 @@ TEMPLATE = """<!DOCTYPE html>
   .kv div:nth-child(odd) {{ color:#9AA0AE; }}
   pre {{
     background:#F7F8FA; border:1px solid var(--line); border-radius:8px; padding:12px;
-    font-size:12px; max-height:320px; overflow:auto; white-space:pre-wrap; word-break:break-all;
+    font-size:12px; max-height:320px; overflow:auto; white-space:pre-wrap; word-break:normal; overflow-wrap:break-word; hyphens:none;
   }}
   .hint {{ font-size:12px; color:var(--sub); line-height:1.8; }}
   .tag {{ display:inline-block; padding:2px 8px; border-radius:4px; background:#EEF2FF;

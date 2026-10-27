@@ -75,6 +75,31 @@ class Topics:
         return score, hits
 
     @property
+    def industry(self) -> dict[str, Any]:
+        return self.raw.get("industry", {})
+
+    def industry_keyword_weight(self, text: str) -> tuple[float, list[str]]:
+        """业界模块专用词表：core 3 分 / boost 1.2 分 / weak 0.5 分。
+
+        为什么不复用 keyword_weight：那套词表是给底层视觉论文与赛事用的，
+        一条「英伟达发布新一代 GPU」的产业新闻在里边一分都拿不到，
+        业界稿就会退化成只剩论文源。这里单列一份泛 AI 产业词表。
+        """
+        cfg = self.industry.get("keywords", {})
+        lowered = text.lower()
+        score, hits = 0.0, []
+        for key, weight in (("core", 3.0), ("boost", 1.2), ("weak", 0.5)):
+            for word in cfg.get(key, []):
+                if str(word).lower() in lowered:
+                    score += weight
+                    hits.append(str(word))
+        return score, hits
+
+    @property
+    def industry_categories(self) -> dict[str, list[str]]:
+        return self.industry.get("categories", {})
+
+    @property
     def venues(self) -> dict[str, int]:
         return self.raw.get("venues", {})
 

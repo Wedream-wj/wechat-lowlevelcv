@@ -6,6 +6,8 @@ Markdown 在这里的角色是「可编辑的中间稿」：
 """
 from __future__ import annotations
 
+from ..spec_tools import normalized_spec
+
 
 def _meta_rows(rows: list) -> str:
     lines = []
@@ -16,7 +18,9 @@ def _meta_rows(rows: list) -> str:
     return "\n".join(lines)
 
 
-def spec_to_markdown(spec: dict, figures: dict[str, dict]) -> str:
+def spec_to_markdown(spec: dict, figures: dict[str, dict], module: str | None = None) -> str:
+    # 与 HTML 渲染共用同一套规范（编号 + 业界事件卡合并），避免预览页与可编辑稿对不上
+    spec = normalized_spec(spec, module)
     out: list[str] = [f"# {spec.get('title', '')}", ""]
     if spec.get("subtitle"):
         out += [f"> {spec['subtitle']}", ""]
@@ -77,7 +81,7 @@ def spec_to_markdown(spec: dict, figures: dict[str, dict]) -> str:
             out += ["---", ""]
 
     if spec.get("takeaway"):
-        out += ["## 写在最后", "", f"**{spec['takeaway']}**", ""]
+        out += ["## 一句话总结", "", f"**{spec['takeaway']}**", ""]
     if spec.get("sources"):
         out += ["### 参考来源", ""]
         for src in spec["sources"]:

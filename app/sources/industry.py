@@ -73,7 +73,7 @@ def parse_feed(body: str, feed_name: str, weight: float = 1.0) -> list[Item]:
             source=feed_name,
             published_at=published,
             summary=summary,
-            category=classify_category(f"{title} {summary}", topics),
+            category=classify_category(f"{title} {summary}", topics, "industry"),
             image_url=image,
             images=[image] if image else [],
             extra={"origin": "rss", "feed": feed_name, "weight": weight},
@@ -99,6 +99,10 @@ async def fetch(client: HttpClient) -> list[Item]:
         name = feed.get("name") or url
         if not url:
             return
+        # enabled: false 的源直接跳过（如公共 RSSHub 实例已不可用），
+        # 不参与抓取也不刷告警，避免「真正的故障」被一片 502 淹没
+        if feed.get("enabled") is False:
+            return
         try:
             body = await client.text(url)
         except Exception as exc:
@@ -107,6 +111,15 @@ async def fetch(client: HttpClient) -> list[Item]:
 
         parsed_feed = feedparser.parse(body)
         parsed = parse_feed(body, name, float(feed.get("weight", 1.0)))
+        # 单源截断：OpenAI News 一次能吐 1300+ 条，不截会把候选池淹掉，
+        # 让量子位/HackCV 这类产业源永远排不进来。按发布时间取最新的 N 条。
+        limit = int(topics.industry.get("feed_max_items", 60) or 0)
+        if limit and len(parsed) > limit:
+            parsed.sort(
+                key=lambda i: i.published_at.timestamp() if i.published_at else 0,
+                reverse=True,
+            )
+            parsed = parsed[:limit]
         entry: dict = {"feed": name, "url": url, "count": len(parsed)}
         if not parsed:
             bozo = getattr(parsed_feed, "bozo_exception", None)

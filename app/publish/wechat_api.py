@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-import mimetypes
 import re
 import time
 from pathlib import Path
@@ -17,6 +16,11 @@ from pathlib import Path
 import httpx
 
 from ..config import settings
+from ..imaging import (
+    CONTENT_IMAGE_MAX_BYTES,
+    MATERIAL_IMAGE_MAX_BYTES,
+    normalize_file,
+)
 
 BASE = "https://api.weixin.qq.com"
 TOKEN_CACHE = settings.db_path.parent / "wx_token.json"
@@ -41,6 +45,9 @@ ERRCODE_HINTS: dict[int, str] = {
            "只能用控制台的「复制富文本」手动粘贴发布。",
     45009: "调用频率超限：稍等几分钟再试（草稿箱每日限额较高，一般碰不到）。",
     40007: "封面 media_id 无效：通常是封面文件格式/大小不符（需 jpg/png，<10MB），重试一次。",
+    40005: "图片格式或体积不合规：微信只接受 jpg/png，正文图 ≤1MB。"
+           "报错里 `[...]` 那串是微信侧随机标识，不是文件名；"
+           "系统已自动把 webp 转成 png/jpeg，若仍失败请检查图片是否损坏。",
 }
 
 
@@ -164,32 +171,35 @@ class WeChatClient:
 
     # ------------------------------------------------------------ upload
     async def upload_content_image(self, file_path: str | Path) -> str:
-        """正文图片，返回可在 content 中直接使用的 URL。"""
-        path = Path(file_path)
-        mime = mimetypes.guess_type(path.name)[0] or "image/png"
-        with path.open("rb") as fh:
-            data = await self._post(
-                "/cgi-bin/media/uploadimg",
-                files={"media": (path.name, fh.read(), mime)},
-            )
-        url = data.get("url", "")
+        """正文图片，返回可在 content 中直接使用的 URL。
+
+        微信只收 jpg/png 且 ≤1MB：webp（量子位/HackCV 大量用）会直接回
+        40005 invalid file type hint。这里统一在上传前转码，旧稿也能推。
+        """
+        try:
+            data, name, mime = normalize_file(file_path, max_bytes=CONTENT_IMAGE_MAX_BYTES)
+        except (OSError, ValueError) as exc:
+            raise WeChatError(f"图片 {Path(file_path).name} 无法转为微信支持的格式：{exc}") from exc
+        resp = await self._post("/cgi-bin/media/uploadimg", files={"media": (name, data, mime)})
+        url = resp.get("url", "")
         if not url:
-            raise WeChatError(f"正文图片上传未返回 url：{data}")
+            raise WeChatError(f"正文图片上传未返回 url：{resp}")
         return url
 
     async def upload_cover_material(self, file_path: str | Path) -> str:
         """封面临时/永久素材，返回 thumb_media_id。"""
-        path = Path(file_path)
-        mime = mimetypes.guess_type(path.name)[0] or "image/png"
-        with path.open("rb") as fh:
-            data = await self._post(
-                "/cgi-bin/material/add_material",
-                params={"type": "image"},
-                files={"media": (path.name, fh.read(), mime)},
-            )
-        media_id = data.get("media_id", "")
+        try:
+            data, name, mime = normalize_file(file_path, max_bytes=MATERIAL_IMAGE_MAX_BYTES)
+        except (OSError, ValueError) as exc:
+            raise WeChatError(f"封面 {Path(file_path).name} 无法转为微信支持的格式：{exc}") from exc
+        resp = await self._post(
+            "/cgi-bin/material/add_material",
+            params={"type": "image"},
+            files={"media": (name, data, mime)},
+        )
+        media_id = resp.get("media_id", "")
         if not media_id:
-            raise WeChatError(f"封面上传未返回 media_id：{data}")
+            raise WeChatError(f"封面上传未返回 media_id：{resp}")
         return media_id
 
     # ------------------------------------------------------------- draft

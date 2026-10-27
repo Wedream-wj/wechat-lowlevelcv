@@ -16,11 +16,16 @@ from ..config import Topics
 from ..models import Item, normalize_title
 
 
-def classify_category(text: str, topics: Topics) -> str:
-    """按命中数量给素材打一个方向标签；全不命中时返回空串。"""
+def classify_category(text: str, topics: Topics, module: str = "") -> str:
+    """按命中数量给素材打一个方向标签；全不命中时返回空串。
+
+    module="industry" 时改用产业分类表（大模型/具身/芯片/开源/资本…），
+    否则泛 AI 新闻会全部落进「未分类」，被多样性上限卡住。
+    """
     lowered = (text or "").lower()
+    categories = topics.industry_categories if module == "industry" else topics.categories
     best, best_hits = "", 0
-    for label, words in topics.categories.items():
+    for label, words in categories.items():
         hits = sum(1 for w in words if w.lower() in lowered)
         if hits > best_hits:
             best, best_hits = label, hits
@@ -52,6 +57,12 @@ def freshness_bonus(published_at: datetime | None, half_life_days: int = 45) -> 
 def score_item(item: Item, topics: Topics) -> tuple[float, list[str]]:
     kw_score, hits = topics.keyword_weight(item.text_blob())
     score = kw_score
+    # 业界模块叠加泛 AI 产业词表：模型发布/融资/芯片/具身等词在论文词表里是零分，
+    # 不叠加的话「英伟达发新卡」这类真·产业新闻会输给一条带 transformer 的旧论文
+    if item.module == "industry":
+        industry_score, industry_hits = topics.industry_keyword_weight(item.text_blob())
+        score += industry_score
+        hits = hits + [h for h in industry_hits if h not in hits]
     score += venue_bonus(item.venue, topics) * 0.8
     score += freshness_bonus(item.published_at)
     score += 2.0 if item.code_url else 0.0
@@ -162,6 +173,7 @@ def select(
     require_keyword_hit: int = 1,
     seen: set[str] | None = None,
     max_per_category: int = 2,
+    max_per_source: int | None = None,
 ) -> list[Item]:
     """规则筛选 + 多样性挑选。"""
     cfg = topics.pipelines.get(module, {})
@@ -171,6 +183,8 @@ def select(
     top_n = default.get("top_n", 3) if top_n is None else top_n
     freshness_days = default.get("freshness_days", 45) if freshness_days is None else freshness_days
     require_keyword_hit = int(default.get("require_keyword_hit", require_keyword_hit))
+    if max_per_source is None:
+        max_per_source = int(default.get("max_per_source", 0) or 0)
     seen = seen or set()
 
     pool: list[Item] = []
@@ -191,15 +205,20 @@ def select(
 
     pool.sort(key=lambda x: (x.score, x.year_int), reverse=True)
 
-    # 多样性：同一任务方向最多 max_per_category 条，避免一期全是超分
+    # 多样性：同一任务方向最多 max_per_category 条，避免一期全是超分；
+    # 同一来源最多 max_per_source 条（业界模块），否则一个聚合站会把整期包圆
     picked: list[Item] = []
     counter: dict[str, int] = {}
+    source_counter: dict[str, int] = {}
     for item in pool:
         cat = item.category or "未分类"
         if counter.get(cat, 0) >= max_per_category:
             continue
+        if max_per_source and source_counter.get(item.source, 0) >= max_per_source:
+            continue
         picked.append(item)
         counter[cat] = counter.get(cat, 0) + 1
+        source_counter[item.source] = source_counter.get(item.source, 0) + 1
         if len(picked) >= (top_n or 3):
             break
     return picked

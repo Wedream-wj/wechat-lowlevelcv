@@ -62,7 +62,7 @@ def _to_item(repo: dict, weight: float) -> Item | None:
         source="GitHub 开源",
         published_at=pushed,
         summary=summary,
-        category=classify_category(f"{name} {desc} {' '.join(topics_list)}", topics),
+        category=classify_category(f"{name} {desc} {' '.join(topics_list)}", topics, "industry"),
         image_url=og_image,
         images=[og_image],
         extra={

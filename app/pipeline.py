@@ -19,12 +19,18 @@ from .config import settings, topics
 from .filters import scoring
 from .llm.client import LLMClient, LLMError
 from .llm.prompts import (
+    INDUSTRY_HOOK_RETRY,
+    drop_redundant_summary,
     drop_unsupported_tables,
+    enforce_title_rules,
     has_numeric_material,
+    industry_lead_is_flat,
     quant_retry_instruction,
     thin_evidence,
+    title_is_number_led,
     unsupported_prose_numbers,
     unsupported_table_numbers,
+    _featured_item as _featured_item_for_title,
 )
 from .models import Article, Item
 from .render import cover as cover_mod
@@ -32,8 +38,17 @@ from .render import wechat
 from .render.markdown import spec_to_markdown
 from .render.preview import render_preview
 from .sources import MODULE_LABEL, arxiv, collect
+from .sources import chinese_media as _chinese_media
 from .sources import competitions as _competitions
+from .sources import publication as _publication
 from .sources.base import HttpClient
+from .spec_tools import (
+    MAX_TABLE_COLS,
+    normalize_meta_cards,
+    normalize_section_titles,
+    prune_spec_tables,
+    renumber_sections,
+)
 
 DATE_FMT = "%Y.%m.%d"
 
@@ -266,7 +281,43 @@ async def run_module(module: str, *, publish: bool | None = None,
                     tables = len(item.extra.get("tables") or [])
                     snippets = len(item.extra.get("result_snippets") or [])
                     _log(f"素材 {item.title[:20]}：表 {tables} 张、数值结论 {snippets} 条")
+                # 发表状态查证：作者自述 → OpenReview → Semantic Scholar。
+                # 已收录的把 venue 更正进标题与信息卡；纯预印本则标题严禁打 arXiv 标签。
+                if selected:
+                    report("配图", 40, "查证论文发表状态（会议/期刊收录）…", True)
+                    for item in selected:
+                        try:
+                            pub = await _publication.resolve_publication(
+                                client, item.title, item.extra.get("arxiv_id", ""),
+                                item.extra.get("comment", ""),
+                                item.extra.get("journal_ref", ""))
+                        except Exception:
+                            pub = {"checked": False, "reason": "查证调用异常"}
+                        if pub.get("checked", True):
+                            item.extra["publication"] = pub
+                            if pub.get("accepted"):
+                                _log(f"发表状态：{item.title[:24]} 已被 {pub['venue']} 正式收录（{pub['source']}）")
+                            else:
+                                _log(f"发表状态：{item.title[:24]} 检索确认仅 arXiv 预印本，标题将不带 arXiv 标签")
+                        else:
+                            _log(f"发表状态：{item.title[:24]} 未能查证（{pub.get('reason', '')}），按保守规则处理")
             report("配图", 42, "下载与整理配图…", True)
+            # 业界稿：量子位首页只有一句摘要，入选后回抓正文，否则写出来全是空泛判断
+            if module == "industry" and selected:
+                report("配图", 44, "回抓产业媒体正文…", True)
+                try:
+                    enriched = await asyncio.wait_for(
+                        _chinese_media.enrich(client, selected), timeout=60.0)
+                    if enriched:
+                        _log(f"补正文：{enriched} 条产业媒体素材")
+                except asyncio.TimeoutError:
+                    msg = "产业媒体正文回抓超时（>60s），本期按摘要撰写"
+                    errors.append({"source": "产业媒体正文", "error": msg})
+                    _log(msg)
+                except Exception as exc:  # 补正文失败不该让整期无稿
+                    msg = f"产业媒体正文回抓失败：{type(exc).__name__}: {exc}"
+                    errors.append({"source": "产业媒体正文", "error": msg})
+                    _log(msg)
             # baseline 精读变体：给学习资源条目补 README 摘录与文件清单（成稿的核心素材）
             if module == "contest" and variant == "baseline":
                 res_item = next((i for i in selected if i.extra.get("is_learning_resource")), None)
@@ -327,6 +378,41 @@ async def run_module(module: str, *, publish: bool | None = None,
                             _log("重写后仍有对不上的数字，保留原稿请人工核对：" + "、".join(left[:6]))
                     except LLMError as exc:
                         _log(f"量化重写失败，保留首稿：{exc}")
+            # 业界稿开篇兜底：模型偶尔退回「近日/XX 宣布」的通稿式起手（Prompt 明令禁止）。
+            # 检测到就定向重写一次导语，只改 lead、不动事实与结构。
+            if module == "industry" and llm.enabled and industry_lead_is_flat(spec):
+                report("成稿", 83, "开篇缺少钩子，定向重写导语…", True)
+                _log(f"开篇为通稿式表述，重写导语：{str((spec.get('lead') or [''])[0])[:32]}")
+                try:
+                    spec = await llm.write(
+                        module, selected, figures, date_str,
+                        on_progress=on_llm,
+                        extra_instruction=INDUSTRY_HOOK_RETRY,
+                    )
+                except LLMError as exc:
+                    _log(f"导语重写失败，保留首稿：{exc}")
+            # 「总结」节与「核心结论」highlight 互斥：Prompt 有规则但模型偶尔不遵守，
+            # 代码层强制执行（首稿与重写两个出口都要过）
+            if drop_redundant_summary(spec):
+                _log("「总结」节与「核心结论」高亮并存，已按互斥规则移除高亮块")
+            # 论文标题信誉度：标题严禁出现 arXiv 字样；venue 必须与发表状态查证
+            # 结论一致（模型偶尔写错会议名），模型违规时代码层强制清洗/对齐
+            if enforce_title_rules(spec, module, selected):
+                _log(f"标题已按发表信誉度规则校正：{spec.get('title', '')[:44]}")
+            # 跑分型标题兜底：Prompt 有禁令但模型偶尔退回数字开头——检测到就花
+            # 几十 token 定向重写一次，重写结果同样要过 venue 与 arXiv 校验
+            if module == "paper" and llm.enabled and title_is_number_led(spec):
+                report("成稿", 84, "标题以数字开头，定向重写为动机驱动…", True)
+                featured = _featured_item_for_title(spec.get("title", ""), selected)
+                new_title = await llm.rewrite_title(spec, featured)
+                if new_title and "arxiv" not in new_title.lower() and len(new_title) <= 44:
+                    old = spec["title"]
+                    spec["title"] = new_title
+                    # venue 前缀在重写后可能丢失：再过一遍对齐逻辑
+                    enforce_title_rules(spec, module, selected)
+                    _log(f"跑分型标题已重写：{old[:24]}… → {spec['title'][:44]}")
+                else:
+                    _log(f"标题重写未产出合格结果（{str(new_title)[:24] or '空'}），保留原题")
             llm_mode = llm.mode
         except LLMError as exc:
             if demo:
@@ -338,13 +424,30 @@ async def run_module(module: str, *, publish: bool | None = None,
                 llm_mode = "mock（live 失败降级）"
             else:
                 raise PipelineError(f"大模型成稿失败：{exc}") from exc
+        # 两条出口（模型成稿 / 失败降级 mock）都要过的规格修正：
+        # 1) 实验表列数：素材表在喂模型前已压到 5 列，但模型仍可能自己拼出超宽表；
+        # 2) 章节标题：口语化叫法（「冷静一下」）收敛到栏目正式名（「写在最后」）；
+        # 3) 章节编号：省略小节（如单篇时的「总结」）后必须整体前移，杜绝 04 → 06 断层；
+        # 4) 业界信息卡：「主体 / 事件 / 规模或金额」三行并成一行，卡面只留「谁干了什么」。
+        pruned = prune_spec_tables(spec)
+        if pruned:
+            _log(f"{pruned} 张表格超出移动端列数上限，已压到 {MAX_TABLE_COLS} 列"
+                 "（被裁指标由正文文字承担）")
+        if normalize_section_titles(spec):
+            _log("章节标题已规范为栏目正式名（冷静一下 → 写在最后）")
+        if normalize_meta_cards(spec, module):
+            _log("业界信息卡已合并「主体 + 事件」为单行，规模/金额折入事件描述")
+        if renumber_sections(spec):
+            _log("章节编号已重排为连续序号："
+                 + " / ".join(str(b.get("text", "")) for b in spec.get("sections") or []
+                              if b.get("type") == "h2"))
         _log(f"成稿完成（{llm_mode}）：{spec.get('title', '')}")
         report("成稿", 85, f"成稿完成（{llm_mode}）：{spec.get('title', '')}", True)
 
         report("排版", 88, "渲染微信排版与预览页…", True)
         cover_path = cover_mod.make_cover(spec, module, date_str)
         body = wechat.render_body(spec, figures, module, date_str)
-        markdown = spec_to_markdown(spec, figures)
+        markdown = spec_to_markdown(spec, figures, module)
 
         article = Article(
             module=module,

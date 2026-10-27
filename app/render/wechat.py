@@ -13,6 +13,9 @@ import re
 from datetime import date
 
 from ..config import topics
+# 卡片标签判定放在 spec_tools：成稿出口与渲染层共用一套规则，
+# 否则「预览页」与「发出去的推文」可能对同一张卡给出不同标题
+from ..spec_tools import CARD_LABELS, normalized_spec, resolve_card_label  # noqa: F401
 
 T = topics.raw.get("theme", {})
 INK = T.get("ink", "#1B1D22")
@@ -41,7 +44,7 @@ def inline(text: str) -> str:
         r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
         lambda m: (
             f'<span style="color:{PRIMARY};border-bottom:1px solid #C7D3FF;'
-            f'word-break:break-all;">{m.group(1)}</span>'
+            f'word-break:normal;overflow-wrap:break-word;hyphens:none;">{m.group(1)}</span>'
         ),
         escaped,
     )
@@ -179,28 +182,30 @@ def highlight(title: str, text: str) -> str:
     )
 
 
-def meta_card(rows: list) -> str:
+def meta_card(rows: list, label: str = "PAPER INFO") -> str:
     trs = []
     valid = [r for r in rows or [] if isinstance(r, (list, tuple)) and len(r) >= 2 and r[1]]
-    for idx, (label, value) in enumerate(valid):
+    for idx, (row_label, value) in enumerate(valid):
         border = "" if idx == len(valid) - 1 else "border-bottom:1px dashed #EFF1F6;"
         value_html = inline(str(value))
         trs.append(
             f'<tr>'
             f'<td style="width:76px;padding:9px 8px 9px 0;font-size:12px;color:{SUB};'
-            f'vertical-align:top;line-height:1.75;white-space:nowrap;{border}">{esc(label)}</td>'
+            f'vertical-align:top;line-height:1.75;white-space:nowrap;{border}">{esc(row_label)}</td>'
             f'<td style="padding:9px 0;font-size:13px;color:#2B2E36;vertical-align:top;'
-            f'line-height:1.75;{border}">{value_html}</td>'
+            f'line-height:1.75;word-break:normal;word-wrap:normal;overflow-wrap:break-word;'
+            f'hyphens:none;{border}">{value_html}</td>'
             f"</tr>"
         )
     if not trs:
         return ""
+    title = esc(label if label in CARD_LABELS else "PAPER INFO")
     return (
         f'<section style="margin:24px 0;border:1px solid {LINE};border-radius:10px;'
         f'overflow:hidden;">'
         f'<section style="padding:10px 16px;background:#F8FAFF;border-bottom:1px solid {LINE};">'
         f'<span style="font-size:11px;letter-spacing:2px;color:{PRIMARY};font-weight:700;">'
-        f"PAPER INFO</span></section>"
+        f"{title}</span></section>"
         f'<section style="padding:4px 16px;"><table style="width:100%;border-collapse:collapse;">'
         f'<tbody>{"".join(trs)}</tbody></table></section></section>'
     )
@@ -226,28 +231,54 @@ def figure(block: dict, figures: dict[str, dict]) -> str:
 
 
 def table(header: list, rows: list) -> str:
+    """实验对比表。
+
+    排版要点（方法名挤成两行的教训）：
+    - table-layout 必须 auto：fixed 会把宽度均分给每一列，而对比表的首列
+      「Methods」是全表最长的单元格（方法名），均分必然把它挤成两行；
+    - 首列 white-space:nowrap：方法名是专有名词，断行比超宽更伤可读性；
+      其余列（数值）很短，auto 布局下自然让出空间。
+    - 列数越多单元格内边距与字号越小：5 列（压缩后的标准宽度）在 340pt 屏上
+      正好铺满，不必横向滚动；只有历史遗留的超宽表才落到滚动容器里。
+    """
     if not header:
         return ""
+    header = [str(h) for h in header]
+    ncols = len(header)
+    rows = [[str(c) for c in (row or [])][:ncols] for row in (rows or [])]
+    if ncols >= 5:
+        pad, head_size, cell_size = "8px 5px", "11px", "11.5px"
+    elif ncols == 4:
+        pad, head_size, cell_size = "9px 7px", "11.5px", "12px"
+    else:
+        pad, head_size, cell_size = "9px 8px", "12px", "12.5px"
     ths = "".join(
-        f'<th style="padding:9px 8px;font-size:12px;font-weight:600;color:#FFFFFF;'
+        f'<th style="padding:{pad};font-size:{head_size};font-weight:600;color:#FFFFFF;'
         f'text-align:left;background:{PRIMARY};border-right:1px solid rgba(255,255,255,0.18);'
-        f'line-height:1.6;">{inline(str(h))}</th>'
-        for h in header
+        f'line-height:1.5;{_nowrap_if_first(ci)}">{inline(h)}</th>'
+        for ci, h in enumerate(header)
     )
     trs = []
     for idx, row in enumerate(rows):
         bg = "#FFFFFF" if idx % 2 == 0 else "#FAFBFE"
         tds = "".join(
-            f'<td style="padding:9px 8px;font-size:12.5px;color:#33373F;line-height:1.65;'
-            f'vertical-align:top;border-bottom:1px solid #EDEFF4;background:{bg};">{inline(str(c))}</td>'
-            for c in row
+            f'<td style="padding:{pad};font-size:{cell_size};color:#33373F;line-height:1.55;'
+            f'vertical-align:middle;border-bottom:1px solid #EDEFF4;background:{bg};'
+            f'{_nowrap_if_first(ci)}">{inline(c)}</td>'
+            for ci, c in enumerate(row)
         )
         trs.append(f"<tr>{tds}</tr>")
     return (
         f'<section style="margin:22px 0;overflow-x:auto;">'
-        f'<table style="width:100%;border-collapse:collapse;table-layout:fixed;">'
+        f'<table style="width:100%;max-width:100%;border-collapse:collapse;'
+        f'table-layout:auto;">'
         f'<thead><tr>{ths}</tr></thead><tbody>{"".join(trs)}</tbody></table></section>'
     )
+
+
+def _nowrap_if_first(col_index: int) -> str:
+    """首列（方法名/指标名列）不换行，靠 auto 布局与横向滚动兜住宽度。"""
+    return "white-space:nowrap;" if col_index == 0 else ""
 
 
 def contest_card(block: dict) -> str:
@@ -265,7 +296,7 @@ def contest_card(block: dict) -> str:
             f'<tr><td style="width:70px;padding:7px 8px 7px 0;font-size:12px;color:{SUB};'
             f'vertical-align:top;white-space:nowrap;line-height:1.7;">{label}</td>'
             f'<td style="padding:7px 0;font-size:13px;color:#2B2E36;vertical-align:top;'
-            f'line-height:1.7;word-break:break-all;">{inline(str(value))}</td></tr>'
+            f'line-height:1.7;word-break:normal;word-wrap:normal;overflow-wrap:break-word;hyphens:none;">{inline(str(value))}</td></tr>'
         )
     return (
         f'<section style="margin:22px 0;border:1px solid #F2E0CE;border-radius:10px;'
@@ -321,7 +352,7 @@ def code_block(block: dict) -> str:
         f"{esc(caption)}</section>"
         f'<section style="padding:14px 16px;background:#14181F;'
         f'font-family:Menlo,Consolas,monospace;font-size:12.5px;line-height:1.75;'
-        f'color:#DCE3F0;word-break:break-all;">{_code_html(code)}</section></section>'
+        f'color:#DCE3F0;word-break:normal;overflow-wrap:break-word;hyphens:none;">{_code_html(code)}</section></section>'
     )
 
 
@@ -333,7 +364,7 @@ def footer(spec: dict, module: str) -> str:
             f'<section style="margin:34px 0 0;padding:20px 18px;background:#151A24;'
             f'border-radius:10px;">'
             f'<section style="font-size:10px;letter-spacing:2.5px;color:#7E8CB0;'
-            f'font-weight:700;margin-bottom:8px;">写在最后</section>'
+            f'font-weight:700;margin-bottom:8px;">一句话总结</section>'
             f'<section style="font-size:15px;color:#F3F5FA;line-height:1.85;font-weight:600;'
             f'text-align:justify;">{inline(takeaway)}</section></section>'
         )
@@ -369,10 +400,13 @@ def footer(spec: dict, module: str) -> str:
 
 # ------------------------------------------------------------------ 入口
 def render_body(spec: dict, figures: dict[str, dict], module: str, date_str: str | None = None) -> str:
+    # 章节编号 + 信息卡兜底：即使上游漏了规范化，渲出的 SECTION 也永远 01,02,03… 连续，
+    # 产业事件卡也不会再出现「主体 / 事件 / 规模或金额」三行拆开的样子
+    spec = normalized_spec(spec, module)
     date_str = date_str or date.today().strftime("%Y.%m.%d")
     parts = [
         f'<section style="font-family:{FONT};font-size:15px;line-height:1.9;color:{INK};'
-        f'letter-spacing:0.3px;word-break:break-word;background:#FFFFFF;padding:2px 0;">',
+        f'letter-spacing:0.3px;word-break:normal;overflow-wrap:break-word;hyphens:none;background:#FFFFFF;padding:2px 0;">',
         kicker(module, date_str),
         lead_block(spec.get("lead") or []),
     ]
@@ -393,7 +427,7 @@ def render_body(spec: dict, figures: dict[str, dict], module: str, date_str: str
         elif btype == "highlight":
             parts.append(highlight(block.get("title", ""), block.get("text", "")))
         elif btype == "meta_card":
-            parts.append(meta_card(block.get("rows") or []))
+            parts.append(meta_card(block.get("rows") or [], resolve_card_label(block, module)))
         elif btype == "figure":
             parts.append(figure(block, figures))
         elif btype == "table":

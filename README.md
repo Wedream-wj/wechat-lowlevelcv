@@ -101,14 +101,17 @@ wechat-lowlevelcv/
 │   ├── models.py            # Item / Article / Figure
 │   ├── db.py                # SQLite：items / issues / runs
 │   ├── pipeline.py          # 全流程编排
+│   ├── spec_tools.py        # ★ 章节编号连续性 + 移动端表格列压缩
+│   ├── imaging.py           # ★ 图片格式归一（webp→png/jpeg，压到微信 1MB 内）
 │   ├── api.py               # FastAPI 路由 + 后台任务
 │   ├── scheduler.py         # APScheduler cron
 │   ├── sources/             # 抓取层（每源一个模块，见下）
-│   │   ├── base.py          #   异步 HTTP、重试、图片落盘、HTML 清洗
+│   │   ├── base.py          #   异步 HTTP、重试、图片落盘（webp→png 归一）、HTML 清洗
 │   │   ├── lowlevelcv.py    #   熵视精选（页面结构实测解析）
 │   │   ├── arxiv.py         #   arXiv API + 架构图提取（HTML→PDF 兜底）
 │   │   ├── paperswithcode.py#   PWC API（已做静默降级）
 │   │   ├── industry.py      #   RSS/Atom 通用 + 逐源体检
+│   │   ├── chinese_media.py #   量子位 / HackCV 直连（中文产业媒体，入选后回抓正文）
 │   │   ├── github_trending.py #  GitHub 开源源（RSS 兜底 + 开源选题）
 │   │   └── competitions.py  #   Kaggle / 天池 / 搜索 / 策展页
 │   ├── filters/scoring.py   # 评分、去重、多样性选择
@@ -142,13 +145,18 @@ wechat-lowlevelcv/
 
 ### 模块 B · 业界进展
 
-- **数据源（双通道，互为兜底）**：
-  - **RSS**：`topics.yaml → industry.feeds`，默认给了 RSSHub 路由（机器之心、PaperWeekly、将门创投、量子位、CVer）+ 官方博客（OpenAI News、Berkeley BAIR、HF、Google Research）。`optional: true` 表示「锦上添花」，挂了不算故障。
+- **数据源（四通道，互为兜底）**：
+  - **中文产业媒体直连**（`app/sources/chinese_media.py`）：量子位首页列表 + HackCV 每日简报。HackCV 的一期简报会被拆成多条独立动态（跳过 arXiv 栏目，避免与论文模块撞题），量子位条目入选后回抓正文（`full_text`），否则只有一句摘要撑不起一篇解读。
+  - **RSS**：`topics.yaml → industry.feeds`，官方博客（OpenAI News、Berkeley BAIR、HF、Google Research）为主。公共 RSSHub 实例在本机网络被代理拦截（实测全部 502），相关线路已置 `enabled: false`，自建实例后改回即可；单源最多取 `feed_max_items` 条（OpenAI 一次能吐 1300+ 条，不截断会淹没其他源）。
   - **GitHub 开源**（`app/sources/github_trending.py`）：按关键词 + `stars>=80` + 近 240 天有 push 搜索仓库，星标量折算成关注度分。它同时解决两个问题：RSS 被限流时模块不至于空转；开源工具/算法更新本身就是本模块的正式选题。
-- **配图**：GitHub 仓库自带稳定的 OpenGraph 预览图（`opengraph.githubassets.com/1/{owner}/{repo}`，1200×630，官方素材），直接拿来当插图；RSS 条目则从 `media_content` / 正文 `<img>` 里取。
+  - **赛道范围**：不限于底层视觉——CV / 深度学习 / AI / Physical AI / 大模型产业的模型发布、企业落地、开源工具、芯片算力、资本动作都覆盖。`industry.keywords`（core/boost/weak 三档）与 `industry.categories`（大模型、具身、芯片、开源、影像终端、资本、AI 应用）只作用于本模块；`max_per_source: 2` 防止一家聚合站包圆整期。
+- **配图**：GitHub 仓库自带稳定的 OpenGraph 预览图（`opengraph.githubassets.com/1/{owner}/{repo}`，1200×630，官方素材），直接拿来当插图；媒体条目取列表缩略图（量子位的原图是全尺寸）。
 - **源体检（重要）**：RSS 被反爬时 `feedparser` 不报错、只返回 0 条——这是这类系统最典型的静默故障。代码把每路源的 `count / error / 返回内容前 120 字` 记进 `industry.LAST_REPORT`，并通过 `/api/sources → rss_health` 与控制台的「源告警」暴露，例如：
   `RSS·机器之心 → ProxyError: 502 Bad Gateway`。
-- **写作立场**：不复述新闻，回答「对做底层视觉的人意味着什么」；厂商 benchmark 必须标注「官方数据，第三方复现待观察」。
+- **写作立场**：开篇必须用「理想 vs 现实 / 学术卷指标 vs 工业卷落地 / 热度 vs 工程价值」的反差做 Hook，禁止「近日/随着/XX 宣布」式流水账；标题走科技产业媒体结构（主体 + 冲突动作 + 标志性结果，数字只来自素材）。
+- **收尾节**：统一叫「**04 | 写在最后**」（旧的「冷静一下」已弃用，`spec_tools.normalize_section_titles` 会在渲染前把别名收敛回正式名）。这一节承担全篇最高的 Insight 密度，按「成本结构 → 演进路径 → 可检验的终极判断」三步收束，信息边界要嵌进判断里说，禁止流水账、心路历程与宏大叙事。
+- **信息卡自适应**：`meta_card` 的标题按主体切换为 `PAPER INFO` / `PROJECT INFO` / `INDUSTRY SNAPSHOT` / `CONTEST INFO`——业界稿里开源项目卡写 `PAPER INFO` 会直接出戏，渲染层（`resolve_card_label`）会按模块与行内容兜底。
+- **产业事件卡的行**：只保留「事件 / 时间 / 影响面」三行。主体和事件并成一句「谁干了什么」（`Runway 开源世界动作模型 Praxis-1`），**不单列「规模或金额」**——数字写进这句事或标题里；模型漏改时 `spec_tools.normalize_meta_cards` / `merge_event_rows` 会在成稿与渲染两处兜底（金额折进事件句的括号内，不丢信息），开源项目卡（`PROJECT INFO`）不参与合并。
 
 ### 模块 C · 赛事竞赛
 
@@ -162,7 +170,7 @@ wechat-lowlevelcv/
 三套 prompt 共享一个 System（人设 + 文风 + 硬性约束 + JSON 规格）+ 模块化任务卡：
 
 - **统一文风约束**：拒绝摘要腔；「问题—做法—代价」叙事；段落 ≤ 4 行；术语中英对照；禁用词表（震惊/炸裂/王炸…）；
-- **事实纪律**：所有数字必须来自素材，找不到写「论文未披露」；评价要落在具体设计上；
+- **事实纪律**：所有数字必须来自素材；次要指标没给就直接省略（不写「未披露/无法量化」）；评价要落在具体设计上；
 - **结构化输出**：`ArticleSpec`，块类型 `h2/h3/p/bullets/numbered/quote/highlight/meta_card/figure/table/contest_card/divider`；
 - **容错**：强制 JSON mode + 本地括号配平修复 + 失败把上次输出回传让模型自修，两次失败才报错；
 - 控制台「看 Prompt」按钮可直接查看完整 Prompt。
@@ -170,10 +178,12 @@ wechat-lowlevelcv/
 ## 6. 微信排版转换器（app/render/wechat.py）
 
 - 全部样式内联（公众号过滤 `<style>` 与 class）；布局用 `section/p/table`，不用 flex/grid；
-- 主色随模块切换（学术蓝 / 青色 / 暖橙），小节编号胶囊、引用块、高亮卡、论文信息卡、赛事卡、深色「写在最后」总结卡；
-- 图片 `width:100%` 自适应；表格用 `table-layout:fixed` + 斑马纹；
+- 主色随模块切换（学术蓝 / 青色 / 暖橙），小节编号胶囊、引用块、高亮卡、信息卡（标签按主体自适应为 PAPER INFO / PROJECT INFO / INDUSTRY SNAPSHOT / CONTEST INFO）、赛事卡、深色「一句话总结」卡片；
+- 图片 `width:100%` 自适应；表格 `table-layout:auto` + 首列方法名不换行，列数上限 5 列（见 `app/spec_tools.py`：组稿前把素材表压到「方法 + 4 个核心指标」，被裁指标由正文文字承担），5 列以上自动收窄内边距与字号，手机端无需横向滚动；
+- 小节编号在代码层强制连续：`renumber_sections()` 按出现顺序重排 01,02,03…，单篇素材省略「总结」也不会出现 04 → 06 的断层；
 - 预览页两个复制入口（Clipboard API + execCommand 兜底）：**「复制 Markdown」**（首选——公众号编辑器支持 Markdown 粘贴，另带「查看 Markdown」面板可手动全选复制）与「复制富文本」；后者粘贴进公众号编辑器即保留内联样式，公众号不认 Markdown 时用它兜底；
-- 推草稿时本地图片自动走 `media/uploadimg` 换成微信 CDN URL（同一张图只传一次）。
+- 推草稿时本地图片自动走 `media/uploadimg` 换成微信 CDN URL（同一张图只传一次）；
+- **图片格式归一**（`app/imaging.py`）：微信只收 jpg/png、正文图 ≤1MB，量子位/HackCV 大量使用 webp，直接推会回 `40005 invalid file type hint`。下载落盘时先把 webp/gif/avif 转 PNG（带透明）或 JPEG（照片，质量 88 起逐级降），上传前再兜一次并压到体积上限，所以历史旧稿也能推。
 
 ## 7. API 一览
 

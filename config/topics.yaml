@@ -147,6 +147,11 @@ network:
 
 # ---------- 模块 A：学术论文 ----------
 academic:
+  awesome:
+    enabled: true
+    # Kobaayyy/Awesome-Low-Level-Vision 经典池：CVPR2020–2026 按年份清单，
+    # 解除「仅限最新论文」限制；每年文件最多入池条数
+    max_per_file: 40
   lowlevelcv:
     enabled: true
     base_url: https://lowlevelcv.com/papers-selection
@@ -176,29 +181,102 @@ academic:
 
 # ---------- 模块 B：业界进展 ----------
 industry:
+  # 赛道范围：不限于底层视觉。底层视觉 / CV / 深度学习 / AI / Physical AI /
+  # 大模型产业的模型发布、企业落地、开源工具、硬件与算力生态、资本动作都覆盖。
+  # 下面这份词表只用于 industry 模块评分（不影响论文与竞赛的选题口径）。
+  keywords:
+    core:
+      - 大模型
+      - 基础模型
+      - 具身智能
+      - 人形机器人
+      - Physical AI
+      - 世界模型
+      - 物理AI
+      - 物理 AI
+      - 智能体
+      - 多模态
+      - 生成式
+      - 算力
+      - 芯片
+      - 融资
+      - 估值
+      - IPO
+      - 收购
+      - 开源模型
+    boost:
+      - 发布
+      - 推出
+      - 开源
+      - 落地
+      - 商业化
+      - 量产
+      - 端侧
+      - 推理
+      - 训练
+      - 数据中心
+      - GPU
+      - NPU
+      - 传感器
+      - 影像
+      - 相机
+      - 车规
+      - 半导体
+      - Agent
+      - VLA
+      - 战略合作
+      - 生态
+    weak:
+      - 行业
+      - 产业
+      - 方案
+      - 平台
+      - 客户
+      - 市场
+
+  # 产业分类：用于成稿的「一期不重复」与栏目标签。
+  # 与顶层 categories（底层视觉任务）分开，否则泛 AI 新闻会全部落进「未分类」，
+  # 被 max_per_category 卡成只能选 2 条。
+  categories:
+    大模型与 Agent: [大模型, 基础模型, 智能体, agent, llm, 多模态, 推理模型, 世界模型]
+    具身智能与机器人: [具身, 机器人, humanoid, physical ai, 物理ai, vla, 自动驾驶, 智能汽车, 机械臂]
+    芯片与算力: [芯片, 算力, gpu, npu, 半导体, 数据中心, 光刻, 制程, 晶圆]
+    开源与工具链: [开源, github, 仓库, sdk, 工具链, 框架, 权重, huggingface, hugging face]
+    影像与终端: [影像, 相机, 手机, 传感器, isp, 端侧, 车规, 拍摄, 摄像头]
+    资本与商业化: [融资, 估值, ipo, 上市, 收购, 营收, 商业化, 订单, 退市]
+    AI 应用与产品: [aigc, 应用, 产品, 助手, 办公, 医疗, 教育, 电商, 视频生成, 文生视频]
+
   feeds:
     # RSSHub 自建实例可替换 rsshub.app；也可直接填任意 RSS/Atom 地址
     # optional: true 表示「锦上添花」——挂了不算故障，只是少一路线索
+    # 实测（2026-10）：公共实例 rsshub.app 在本机网络被代理拦截（全部 502），
+    # 公众号线索改由下方 chinese_media 直连站点抓取；这几路先置 enabled: false
+    # 止血（不再刷告警、不再白等超时），自建 RSSHub 后把 enabled 改回 true 即可。
     - name: 机器之心
       url: https://rsshub.app/jiqizhixin/daily
       weight: 1.0
       optional: true
+      enabled: false   # 公共 RSSHub 实例实测 502，恢复自建实例后改回 true
     - name: PaperWeekly
       url: https://rsshub.app/paperweekly
       weight: 1.0
       optional: true
+      enabled: false   # 公共 RSSHub 实例实测 502，恢复自建实例后改回 true
     - name: 将门创投
       url: https://rsshub.app/thejiangmen
       weight: 0.9
       optional: true
+      enabled: false   # 公共 RSSHub 实例实测 502，恢复自建实例后改回 true
     - name: 量子位
       url: https://rsshub.app/qbitai
       weight: 0.9
       optional: true
+      enabled: false   # 公共 RSSHub 实例实测 502，恢复自建实例后改回 true
     - name: CVer
       url: https://rsshub.app/wechat/cver
       weight: 0.8
       optional: true
+      enabled: false   # 公共 RSSHub 实例实测 502，恢复自建实例后改回 true
     # 官方博客：全球可访问，作为 RSS 稳定项
     - name: OpenAI News
       url: https://openai.com/news/rss.xml
@@ -214,6 +292,27 @@ industry:
       url: https://research.google/blog/rss/
       weight: 0.7
       optional: true
+  # 单路 RSS 最多取 N 条：OpenAI News 一次能返回 1300+ 条，
+  # 不截断会把整个候选池淹掉（其他源再优质也排不进来）
+  feed_max_items: 60
+
+  # 中文产业媒体：直连站点抓取（不依赖 RSSHub），业界稿的一手线索来源
+  chinese_media:
+    qbitai:
+      enabled: true
+      url: https://www.qbitai.com/
+      name: 量子位
+      weight: 1.4          # 头部 AI 产业媒体，权重高于普通博客
+      max_items: 30
+      enrich_chars: 3000   # 入选后回抓正文的字数上限（首页只有一句摘要）
+    hackcv:
+      enabled: true
+      url: https://hackcv.com/
+      name: HackCV
+      weight: 1.0
+      briefs: 2            # 解析最近 N 期「每日简报」
+      max_items: 40
+
   # 开源项目动态：RSS 全挂时的兜底，也是「开源工具/算法更新」的正式选题来源
   github:
     enabled: true
@@ -233,12 +332,17 @@ industry:
     top_n: 4
     freshness_days: 120    # 开源项目更新慢，别按新闻的时效卡太死
     require_keyword_hit: 1
+    # 同一来源最多 2 条：HackCV 这类聚合站单期就有 30+ 条高分素材，
+    # 不限制会把量子位/GitHub 全挤出去，一期变成一家媒体的转述
+    max_per_source: 2
   # 想让模型重点关注的方向（会写进 prompt）
   focus:
-    - 底层视觉相关的大模型 / 基础模型（如通用复原、生成式复原）
-    - 开源工具链、推理框架、数据集与评测基准
-    - 手机 / 相机 / 视频平台的影像算法落地
-    - 顶会工业界论文与竞赛成果的工程化解读
+    - 大模型 / 基础模型 / 多模态 / 智能体的能力边界与成本变化
+    - Physical AI、具身智能、人形机器人与自动驾驶的产业进展
+    - 底层视觉、CV 与影像算法在手机 / 相机 / 视频平台的落地
+    - 开源模型、工具链、推理框架、数据集与评测基准
+    - 芯片、算力、端侧推理与硬件生态的供给变化
+    - 融资、IPO、收购与商业化动作背后的技术路线判断
 
 # ---------- 模块 C：竞赛 ----------
 competitions:
