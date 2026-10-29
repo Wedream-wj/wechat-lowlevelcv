@@ -352,61 +352,66 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
             return f"{m.group(0)}（剩 {days} 天）"
         return m.group(0)
 
-    pool = items[:4]
-    # 底层视觉类目命中数：全部命中才用「底层视觉赛事」措辞；零命中说明本期在办
-    # 的都是相邻方向，标题与导语要如实说，不能硬贴栏目标签
-    cv_labels = set(topics.categories) | {"底层视觉"}
-    cv_n = sum(1 for i in pool if (i.category or "") in cv_labels)
-    cards: list[dict] = []
-    for item in pool:
-        cards += [
-            {"type": "contest_card",
-             "name": item.title,
-             "track": item.category or "综合赛事",
-             "prize": str(item.extra.get("prize") or "待官方公布"),
-             "deadline": _fmt_deadline(item),
-             "entry": item.url,
-             "desc": _desc(item.summary)},
-            {"type": "divider"},
-        ]
-    if cards:
-        cards.pop()
-    sections: list[dict] = [{"type": "h2", "text": "01 | 本期值得关注的赛事"}]
-    sections += cards
-    sections += [
-        {"type": "h2", "text": "02 | 时间线与怎么选"},
-        {"type": "table", "header": ["赛事", "方向", "截止", "奖金"],
-         "rows": [[i.title[:40], i.category or "综合赛事", _fmt_deadline(i),
-                   str(i.extra.get("prize") or "待官方公布")] for i in pool]},
+    # 离线兜底稿同样是「单场精读」结构：模型不可用时，降级出稿不能退回多赛事盘点
+    item = main
+    detail = item.extra.get("contest_detail") or {}
+    brief = _desc(detail.get("official_brief") or item.summary or "", 400)
+    rows = [["赛事", item.title]]
+    if item.extra.get("organizer"):
+        rows.append(["主办", str(item.extra["organizer"])])
+    if item.category:
+        rows.append(["赛道", item.category])
+    deadline_text = _fmt_deadline(item)
+    if deadline_text:
+        rows.append(["关键节点", deadline_text])
+    if item.extra.get("prize"):
+        rows.append(["奖项", str(item.extra["prize"])])
+    if item.url:
+        rows.append(["入口", item.url])
+    sections: list[dict] = [
+        {"type": "meta_card", "label": "COMPETITION INFO", "rows": rows},
+        {"type": "h2", "text": "01 | 赛事背景：这道题为什么现在出现"},
+        {"type": "p", "text": brief or
+         "这道赛题的价值不在名次，而在于它把真实场景里最难对齐的一环单独拎出来做成了评测口径。"},
+        {"type": "h2", "text": "02 | 任务定义与数据"},
+        {"type": "p", "text": _desc(item.summary, 300) or
+         "赛题给定了明确的输入输出与提交格式，数据规模与分布决定了方案的上限。"},
+        {"type": "h2", "text": "03 | 评测指标的设计意图"},
+        {"type": "p", "text": "指标的选择决定了刷分方向：先确认它惩罚的是过平滑还是过拟合，再决定后处理策略。"},
+        {"type": "h2", "text": "04 | 赛程与规则细节"},
+        {"type": "p", "text": f"截止时间：{deadline_text}。提交次数、外部数据与预训练模型的限制，以官方规则为准。"},
+        {"type": "h2", "text": "05 | 破局思路：从 baseline 到前十"},
+        {"type": "h3", "text": "先把评测口径对齐"},
         {"type": "bullets", "items": [
-            "先看截止倒计时：剩不足两周的赛事，只做增量改进更稳，别押注从头训的方案",
-            "同一方向只报一场：相近赛题共享技巧，集中精力才有产出",
-            "奖金与参赛队伍数一起看：队伍数远超奖金梯度的赛事，性价比要打折",
+            "本地验证集按场景/设备切分，别用随机切分骗自己",
+            "先跑通一次完整提交，再谈模型改动",
         ]},
-        {"type": "h2", "text": "03 | 参赛避坑"},
-        {"type": "bullets", "items": ["先确认评测指标与提交格式，再设计模型", "注意训练集与测试集的分布差异", "预留至少 30% 时间做复现与集成"]},
+        {"type": "h3", "text": "数据层面的差异化"},
+        {"type": "bullets", "items": [
+            "清洗与去重优先于换模型，脏样本对指标的伤害最难定位",
+            "难例挖掘与伪标签是性价比最高的一步",
+        ]},
+        {"type": "h3", "text": "模型与后处理"},
+        {"type": "bullets", "items": [
+            "从强 baseline 起步，改进点一次只动一个变量",
+            "针对评测指标做后处理，往往比换骨干网络收益更直接",
+        ]},
+        {"type": "h2", "text": "06 | 写在最后"},
+        {"type": "p", "text": "把这场赛事放回行业里看，它考的不是某个模型的绝对精度，"
+                                "而是把数据、评测与工程约束同时对齐的能力——这也正是实际项目里最容易失控的三件事。"},
+        {"type": "p", "text": "如果主办方在下一届把评测口径收得更严，那么靠后处理堆分的空间会被压缩，"
+                                "真正拉开差距的会是数据构建与验证集设计。"},
+        {"type": "quote", "text": "先确认评分规则奖励什么，再决定把时间投在哪。"},
     ]
-    if cv_n == len(pool):
-        title = f"本期值得打的底层视觉赛事：{len(pool)} 场进行中"
-        digest = "自动汇总仍在进行 / 即将开始的底层视觉赛事，含赛题方向、奖金与截止倒计时。"
-        lead0 = f"本期汇总 {len(pool)} 场与底层视觉相关的赛事，已自动过滤过期与报名截止的场次。"
-    elif cv_n > 0:
-        title = f"本期值得打的赛事：{cv_n} 场底层视觉 + {len(pool) - cv_n} 场相邻方向"
-        digest = "自动汇总仍在进行 / 即将开始的赛事，含赛题方向、奖金与截止倒计时。"
-        lead0 = f"本期汇总 {len(pool)} 场赛事，其中 {cv_n} 场与底层视觉直接相关，已自动过滤过期与报名截止的场次。"
-    else:
-        title = f"本期暂无纯底层视觉赛事在办，先看 {len(pool)} 场相邻方向"
-        digest = "自动汇总仍在进行 / 即将开始的赛事，含赛题方向、奖金与截止倒计时。"
-        lead0 = "本期没有检索到仍在报名的纯底层视觉赛事，先整理几场相邻方向的 AI 赛事，已自动过滤过期与报名截止的场次。"
     return {
-        "title": title,
-        "subtitle": "已过滤过期赛事，按截止时间与奖金整理",
-        "digest": digest,
-        "lead": [lead0,
-                 "时间与奖金以官方页面为准，建议先跑通 baseline 再决定投入。"],
+        "title": f"{_desc(item.title, 22)}：{item.category or 'AI'}赛道的门槛在哪",
+        "subtitle": f"{item.category or '综合赛事'} · 单场赛事精读",
+        "digest": _desc(item.summary or item.title, 100),
+        "lead": [f"这期只讲一场：{item.title}。",
+                 "从赛题背景、数据与指标口径出发，给出一条能照着执行的参赛路线。"],
         "sections": sections,
-        "takeaway": "选一场与手头数据最接近的赛事，胜率比奖金更重要。",
-        "sources": [{"name": i.title, "url": i.url} for i in pool],
+        "takeaway": "先对齐评测口径，再谈模型；把有限时间压在数据侧，通常是这类赛题回报最高的一步。",
+        "sources": [{"name": item.title, "url": item.url}],
     }
 
 

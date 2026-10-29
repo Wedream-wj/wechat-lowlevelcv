@@ -19,6 +19,8 @@ from app.spec_tools import (
     normalized_spec,
     prune_spec_tables,
     renumber_sections,
+    strip_countdown_title,
+    strip_meta_time,
 )
 
 
@@ -176,6 +178,75 @@ SVI_TABLE = {
         ["SVI360 (Ours)", "38.68", "37.73", "0.9647", "12.36", "15.22", "19.74", "50.1", "365"],
     ],
 }
+
+
+class TestMetaTime(unittest.TestCase):
+    """「当前日期 2026-10-28，距报名关闭只剩 3 天」这类句子必须清掉。
+
+    读者不需要知道编辑是哪天写的稿；而且跨天推送后这句话立刻自相矛盾。
+    """
+
+    def test_sentence_removed_others_kept(self):
+        spec = {"sections": [{"type": "p", "text":
+                              "赛程分两段。比赛时间截止2026-10-31，报名剩余3天。"
+                              "当前日期2026-10-28，距报名关闭只剩3天。资格赛提交次数不限。"}]}
+        self.assertEqual(strip_meta_time(spec), 1)
+        text = spec["sections"][0]["text"]
+        self.assertNotIn("当前日期", text)
+        self.assertIn("报名剩余3天", text)   # days_left 形态允许保留
+        self.assertIn("资格赛提交次数不限", text)
+
+    def test_block_dropped_when_pure_meta(self):
+        spec = {"sections": [{"type": "p", "text": "截至今天，本文成稿于 2026-10-28。"},
+                              {"type": "p", "text": "正常段落。"}]}
+        self.assertEqual(strip_meta_time(spec), 1)
+        self.assertEqual(len(spec["sections"]), 1)
+
+    def test_bullets_filtered(self):
+        spec = {"sections": [{"type": "bullets",
+                              "items": ["距发稿只剩一周", "初赛 100 分制"]}]}
+        strip_meta_time(spec)
+        self.assertEqual(spec["sections"][0]["items"], ["初赛 100 分制"])
+
+    def test_clean_spec_untouched(self):
+        spec = _spec("01 | 背景")
+        before = [dict(b) for b in spec["sections"]]
+        self.assertEqual(strip_meta_time(spec), 0)
+        # 没命中时不做任何改写（包括不重建 sections 列表）
+        self.assertEqual(len(spec["sections"]), len(before))
+
+
+class TestCountdownTitle(unittest.TestCase):
+    """报名已关时标题不许带「N 天报名倒计时」：赛程还在，报名口关了。"""
+
+    def test_stripped_when_registration_closed(self):
+        spec = {"title": "余震预测国际大赛：3 个时间窗、3 天报名倒计时"}
+        self.assertTrue(strip_countdown_title(spec, True))
+        self.assertEqual(spec["title"], "余震预测国际大赛：3 个时间窗")
+
+    def test_tail_separator_cleaned(self):
+        spec = {"title": "图像超分辨率重建挑战赛，距报名截止只剩 2 天"}
+        strip_countdown_title(spec, True)
+        self.assertEqual(spec["title"], "图像超分辨率重建挑战赛")
+
+    def test_untouched_when_registration_open(self):
+        spec = {"title": "具身智能挑战赛：3 天报名倒计时"}
+        self.assertFalse(strip_countdown_title(spec, False))
+        self.assertEqual(spec["title"], "具身智能挑战赛：3 天报名倒计时")
+
+    def test_short_result_rejected(self):
+        # 删完只剩「短标题」就不动手，宁可留着也不把标题削成半个词
+        spec = {"title": "超分赛，3 天倒计时"}
+        self.assertFalse(strip_countdown_title(spec, True))
+
+    def test_days_left_hidden_when_closed(self):
+        item = Item(module="contest", title="X", url="https://e.com", source="天池",
+                    summary="s",
+                    extra={"days_left": 3,
+                           "contest_detail": {"registration_closed": True}})
+        self.assertNotIn("days_left", _item_payload(1, item, []))
+        item.extra["contest_detail"]["registration_closed"] = False
+        self.assertEqual(_item_payload(1, item, [])["days_left"], 3)
 
 
 class TestTableCompaction(unittest.TestCase):

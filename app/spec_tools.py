@@ -91,8 +91,87 @@ def renumber_sections(spec: dict) -> bool:
     return changed
 
 
+# ------------------------------------------------------------------ 元时间清洗
+# 模型很爱写「当前日期 2026-10-28，距报名关闭只剩 3 天」这类句子：读者看的是推文，
+# 不是编辑工作日历；而且这类日期一旦跨天发出就自相矛盾。Prompt 里已明令禁止，
+# 这里再兜一层——命中即整句删除，不动其他数字。
+_META_TIME_RE = re.compile(
+    r"当前日期|截至今天|今天是\s*\d{4}|距(?:发稿|今天|推送)|发稿(?:时|日|前)|"
+    r"本文(?:成稿|写于|发表于)|写作(?:时|于)|截稿(?:时|日)"
+)
+_SENT_SPLIT_RE = re.compile(r"[^。！？]*[。！？]|[^。！？]+$")
+
+
+def strip_meta_time(spec: dict) -> int:
+    """删掉正文里「当前日期/距发稿」这类元信息句，返回被删句数。
+
+    只处理句子级的整句删除：一段里其他句子原样保留；删空了的块直接移除，
+    避免留下空段落或空 bullet。
+    """
+    removed = 0
+    sections = spec.get("sections") or []
+    kept_blocks = []
+    for block in sections:
+        if not isinstance(block, dict):
+            kept_blocks.append(block)
+            continue
+        btype = block.get("type")
+        if btype in ("p", "quote", "highlight"):
+            text = str(block.get("text") or "")
+            if not _META_TIME_RE.search(text):
+                kept_blocks.append(block)
+                continue
+            sentences = [s for s in _SENT_SPLIT_RE.findall(text) if s.strip()]
+            kept = [s for s in sentences if not _META_TIME_RE.search(s)]
+            removed += len(sentences) - len(kept)
+            if not kept:
+                continue  # 整块都是元信息，直接丢
+            block["text"] = "".join(kept).strip()
+            kept_blocks.append(block)
+        elif btype in ("bullets", "numbered"):
+            items = block.get("items") or []
+            kept = [it for it in items
+                    if not (isinstance(it, str) and _META_TIME_RE.search(it))]
+            if len(kept) != len(items):
+                removed += len(items) - len(kept)
+                if not kept:
+                    continue
+                block["items"] = kept
+            kept_blocks.append(block)
+        else:
+            kept_blocks.append(block)
+    if removed:
+        spec["sections"] = kept_blocks
+    return removed
+
+
+# 「3 天报名倒计时」「距报名截止只剩 2 天」这类标题尾巴：只在报名口已关时才清，
+# 因为此时它一定与正文的「报名已结束」矛盾（赛程整体仍在 ≠ 还能报名）。
+_TITLE_COUNTDOWN_RE = re.compile(
+    r"[，、,;；:：\s—-]*\d+\s*天(?:报名)?倒计时"
+    r"|[，、,;；:：]\s*报名(?:仅|只)?(?:还剩|剩|还有)\s*\d+\s*天"
+    r"|[，、,;；:：]\s*距(?:报名|提交)?截止(?:仅|只)?(?:还剩|剩|还有)\s*\d+\s*天"
+)
+_TITLE_TAIL_RE = re.compile(r"[，、,;；:：\s—\-]+$")
+
+
+def strip_countdown_title(spec: dict, registration_closed: bool) -> bool:
+    """报名已关时摘掉标题里的倒计时短语，返回是否改动。
+
+    只在「删完还剩一个像个标题的句子」时才动手（≥8 字），避免把标题削成半个词。
+    """
+    if not registration_closed:
+        return False
+    title = str(spec.get("title") or "")
+    new = _TITLE_TAIL_RE.sub("", _TITLE_COUNTDOWN_RE.sub("", title)).strip()
+    if new == title or len(new) < 8:
+        return False
+    spec["title"] = new
+    return True
+
+
 def normalized_spec(spec: dict, module: str | None = None) -> dict:
-    """返回「标题已规范、编号已连续、信息卡已收敛」的浅拷贝（不改写调用方的 spec）。
+    """返回「标题已规范、编号已连续、信息卡已收敛、元时间已剔除」的浅拷贝。
 
     module 传业界时会顺带把产业事件卡的主体/事件行合并成一行——渲染层与成稿出口
     共用这一份逻辑，避免预览与推文长得不一样。
@@ -101,7 +180,7 @@ def normalized_spec(spec: dict, module: str | None = None) -> dict:
     needs_numbering = any(_numbered_h2(b) for b in sections)
     needs_cards = module == "industry" and any(
         isinstance(b, dict) and b.get("type") == "meta_card" for b in sections)
-    if not needs_numbering and not needs_cards:
+    if not needs_numbering and not needs_cards and module != "contest":
         return spec
     clone = dict(spec)
     clone["sections"] = [dict(b) if isinstance(b, dict) else b for b in sections]
@@ -109,11 +188,17 @@ def normalized_spec(spec: dict, module: str | None = None) -> dict:
         normalize_meta_cards(clone, module)
     normalize_section_titles(clone)
     renumber_sections(clone)
+    strip_meta_time(clone)
     return clone
 
 
 # ------------------------------------------------------------------ 信息卡
-CARD_LABELS = ("PAPER INFO", "PROJECT INFO", "INDUSTRY SNAPSHOT", "CONTEST INFO")
+CARD_LABELS = ("PAPER INFO", "PROJECT INFO", "INDUSTRY SNAPSHOT",
+               "COMPETITION INFO", "EVENT SNAPSHOT", "CONTEST INFO")
+# 旧稿里写的是 CONTEST INFO，新规范拆成「赛题精读」与「赛事快照」两种，读到时映射过去
+_LABEL_ALIASES = {"CONTEST INFO": "COMPETITION INFO"}
+# 卡片行里出现这些词，说明这张卡在讲赛题本身（任务/数据/指标），而不是时间与奖项
+_COMPETITION_HINTS = ("赛题", "任务", "数据", "指标", "评测", "赛道", "评分", "提交", "模型")
 
 # 行内容出现这些词，说明主体是仓库/工具链，卡片标题该是 PROJECT INFO
 # 注意「权重」不能单独作特征词：产业新闻里「开放权重」是高频说法，
@@ -139,6 +224,7 @@ def resolve_card_label(block: dict, module: str) -> str:
     否则按模块 + 行内容兜底——行里出现仓库/星标/许可证这类词，判为 PROJECT INFO。
     """
     explicit = str(block.get("label") or "").strip().upper()
+    explicit = _LABEL_ALIASES.get(explicit, explicit)
     if explicit in CARD_LABELS:
         return explicit
     rows = [r for r in (block.get("rows") or []) if isinstance(r, (list, tuple)) and len(r) >= 2]
@@ -153,7 +239,10 @@ def resolve_card_label(block: dict, module: str) -> str:
     if module == "paper":
         return "PAPER INFO"
     if module == "contest":
-        return "CONTEST INFO"
+        # 赛题精读卡讲「任务/数据/指标」→ COMPETITION INFO；
+        # 只写时间、奖金、入口的赛程卡 → EVENT SNAPSHOT
+        is_competition = any(hint in text for hint in _COMPETITION_HINTS)
+        return "COMPETITION INFO" if is_competition else "EVENT SNAPSHOT"
     return "PROJECT INFO" if is_project else "PAPER INFO"
 
 

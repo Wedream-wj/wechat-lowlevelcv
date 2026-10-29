@@ -63,6 +63,12 @@ def score_item(item: Item, topics: Topics) -> tuple[float, list[str]]:
         industry_score, industry_hits = topics.industry_keyword_weight(item.text_blob())
         score += industry_score
         hits = hits + [h for h in industry_hits if h not in hits]
+    # 赛事模块同理：赛道已放宽到 CV / 深度学习 / AI 泛领域，
+    # 只靠底层视觉词表会把「多模态大模型挑战赛」这类赛题直接打到 min_score 以下
+    if item.module == "contest":
+        contest_score, contest_hits = topics.contest_keyword_weight(item.text_blob())
+        score += contest_score
+        hits = hits + [h for h in contest_hits if h not in hits]
     score += venue_bonus(item.venue, topics) * 0.8
     score += freshness_bonus(item.published_at)
     score += 2.0 if item.code_url else 0.0

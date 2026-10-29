@@ -99,6 +99,24 @@ class Topics:
     def industry_categories(self) -> dict[str, list[str]]:
         return self.industry.get("categories", {})
 
+    def contest_keyword_weight(self, text: str) -> tuple[float, list[str]]:
+        """赛事模块的泛 AI 词表：core 2.5 / boost 1.0 / weak 0.4。
+
+        为什么单列：赛事模块已放宽到 CV / 深度学习 / AI 泛领域，而主词表只认
+        底层视觉——「多模态大模型挑战赛」「遥感地物分类」在里边几乎零分，
+        会被 min_score 直接砍掉，候选池就退化成只有超分/去噪几场。
+        权重比业界词表略低：赛事判断最终靠截止时间与可打性，不靠热词堆分。
+        """
+        cfg = self.raw.get("competitions", {}).get("keywords", {})
+        lowered = text.lower()
+        score, hits = 0.0, []
+        for key, weight in (("core", 2.5), ("boost", 1.0), ("weak", 0.4)):
+            for word in cfg.get(key, []):
+                if str(word).lower() in lowered:
+                    score += weight
+                    hits.append(str(word))
+        return score, hits
+
     @property
     def venues(self) -> dict[str, int]:
         return self.raw.get("venues", {})

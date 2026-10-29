@@ -169,9 +169,16 @@ class TestCardLabel(unittest.TestCase):
         self.assertEqual(wechat.resolve_card_label({"label": "WHATEVER", "rows": []},
                                                    "industry"), "INDUSTRY SNAPSHOT")
 
-    def test_contest_card_uses_contest_label(self):
-        block = {"rows": [["赛题", "图像复原"], ["平台", "天池"]]}
-        self.assertEqual(wechat.resolve_card_label(block, "contest"), "CONTEST INFO")
+    def test_contest_card_labels_by_content(self):
+        # 讲赛题本身（任务/数据/指标）→ COMPETITION INFO
+        block = {"rows": [["赛题", "图像复原"], ["任务", "RAW 域去噪"], ["指标", "PSNR"]]}
+        self.assertEqual(wechat.resolve_card_label(block, "contest"), "COMPETITION INFO")
+        # 只讲时间与奖项 → EVENT SNAPSHOT
+        snapshot = {"rows": [["赛事", "X"], ["关键节点", "11-20 截止"], ["奖项", "3 万美元"]]}
+        self.assertEqual(wechat.resolve_card_label(snapshot, "contest"), "EVENT SNAPSHOT")
+        # 旧稿里的 CONTEST INFO 读到时映射到新规范
+        legacy = {"label": "CONTEST INFO", "rows": [["赛事", "X"]]}
+        self.assertEqual(wechat.resolve_card_label(legacy, "contest"), "COMPETITION INFO")
 
     def test_render_industry_never_shows_paper_info(self):
         spec = {

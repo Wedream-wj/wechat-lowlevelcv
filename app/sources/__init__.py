@@ -7,8 +7,8 @@ from typing import Awaitable, Callable
 
 from ..models import Item
 from .base import HttpClient
-from . import (arxiv, awesome_llv, chinese_media, competitions, github_trending, industry,
-               lowlevelcv, paperswithcode)
+from . import (arxiv, awesome_llv, chinese_media, competitions, contest_feeds,
+               github_trending, industry, lowlevelcv, paperswithcode)
 
 Collector = Callable[[HttpClient], Awaitable[list[Item]]]
 
@@ -29,6 +29,12 @@ COLLECTORS: dict[str, list[tuple[str, Collector]]] = {
     ],
     "contest": [
         ("赛事聚合", competitions.fetch),
+        # 专业赛事雷达/聚合站：每条都是独立源，坏哪一路就在告警里点名，
+        # 不会因为一个反爬站点把整池候选拖成 0
+        ("AI 赛事雷达", contest_feeds.fetch_radar),
+        ("ML Contests", contest_feeds.fetch_mlcontests),
+        ("Codabench", contest_feeds.fetch_codabench),
+        ("FlyAI", contest_feeds.fetch_flyai),
         # 独立源而非塞在 fetch() 里拼：失败/限流要进 collect() 的源告警，
         # 让运营看见「baseline 源 0 条」，而不是静默吞掉后让筛选层报出误导性错误
         ("Datawhale baseline", competitions.fetch_baseline),
@@ -46,6 +52,11 @@ SOURCE_TIMEOUTS: dict[str, float] = {
     "HackCV": 60.0,
     "GitHub 开源": 60.0,
     "赛事聚合": 120.0,
+    "AI 赛事雷达": 45.0,
+    "ML Contests": 45.0,
+    # 无头浏览器启动 + 渲染，比普通请求慢一个量级，给足超时
+    "Codabench": 100.0,
+    "FlyAI": 40.0,
     "Datawhale baseline": 45.0,
 }
 

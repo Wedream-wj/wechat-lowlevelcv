@@ -32,7 +32,13 @@ from urllib.parse import quote, quote_plus
 from ..config import topics
 from ..filters.scoring import score_item
 from ..models import Item
+from . import headless
 from .base import HttpClient, strip_html
+
+try:  # 解析官方页 / 静态列表用；缺依赖时不至于整模块导入失败
+    from bs4 import BeautifulSoup
+except Exception:  # pragma: no cover
+    BeautifulSoup = None  # type: ignore[assignment]
 
 KAGGLE_API = "https://www.kaggle.com/api/v1/competitions/list"
 TIANCHI_DEFAULT_API = "https://tianchi.aliyun.com/v3/proxy/competition/api/race/page"
@@ -195,6 +201,23 @@ def find_dates(text: str, *, future_only: bool = False) -> list[tuple[datetime, 
     return sorted(found.items())
 
 
+# 只有荣誉/积分的「练习赛」：没有奖金、参赛规模又小，撑不起一篇精读
+_PLACEHOLDER_PRIZES = {"kudos", "knowledge", "swag", "points", "badge", "certificate",
+                       "honor", "honour", "证书", "荣誉"}
+
+
+def _is_low_value(item: Item) -> bool:
+    """课堂练习赛识别：奖金只是 Kudos/积分，且参赛队伍不到 200 支。"""
+    prize = str(item.extra.get("prize") or "").strip().lower()
+    if prize not in _PLACEHOLDER_PRIZES:
+        return False
+    try:
+        teams = int(item.extra.get("team_count") or 0)
+    except (TypeError, ValueError):
+        teams = 0
+    return teams < 200
+
+
 def filter_active(items: list[Item], upcoming_days: int = 120, now: datetime | None = None) -> list[Item]:
     """强时效过滤：过期 / 超出推荐窗口 / 无截止线索的赛事一律丢弃。
 
@@ -202,9 +225,12 @@ def filter_active(items: list[Item], upcoming_days: int = 120, now: datetime | N
     """
     now = now or datetime.now()
     horizon = now + timedelta(days=upcoming_days)
-    expired = windowed = undated = 0
+    expired = windowed = undated = lowvalue = 0
     kept: list[Item] = []
     for item in items:
+        if _is_low_value(item):
+            lowvalue += 1
+            continue
         raw = str(item.extra.get("deadline") or "")
         dl = parse_deadline(raw) if raw else None
         if dl is not None:
@@ -225,7 +251,8 @@ def filter_active(items: list[Item], upcoming_days: int = 120, now: datetime | N
             continue
         kept.append(item)
     print(
-        f"[contest] 时效过滤：过期 {expired} / 超出 {upcoming_days} 天窗口 {windowed} / 无截止线索 {undated}，保留 {len(kept)}",
+        f"[contest] 时效过滤：过期 {expired} / 超出 {upcoming_days} 天窗口 {windowed} / "
+        f"无截止线索 {undated} / 练习赛 {lowvalue}，保留 {len(kept)}",
         flush=True,
     )
     return kept
@@ -273,6 +300,18 @@ def parse_kaggle(payload: list[dict]) -> list[Item]:
         )
         item.score, item.keywords = score_item(item, topics)
         item.score += 3.0 if deadline and deadline > datetime.now(timezone.utc) else 0.0
+        # 质量分：Kaggle 里大量课堂练习赛（奖金 Kudos、队伍 1-20 支），
+        # 关键词一样命中，但撑不起一篇精读。真金白银 + 真实参赛规模才算值得写。
+        prize_txt = str(item.extra.get("prize") or "")
+        if any(cur in prize_txt for cur in "¥￥$"):
+            item.score += 2.0
+        elif prize_txt and prize_txt.lower() not in ("kudos", "knowledge", "swag", "points"):
+            item.score += 1.0
+        teams = int(row.get("teamCount") or 0)
+        if teams >= 200:
+            item.score += 1.5
+        elif teams <= 10:
+            item.score -= 1.5
         items.append(item)
     return items
 
@@ -381,6 +420,11 @@ async def fetch_tianchi(client: HttpClient) -> list[Item]:
             )
             item.score, item.keywords = score_item(item, topics)
             item.keywords = list(dict.fromkeys(list(item.keywords) + [t for t in tags if t]))[:12]
+            teams = int(row.get("teamCount") or 0)
+            if teams >= 200:
+                item.score += 1.5  # 有真实竞争规模，才撑得起「破局思路」这一节
+            elif bonus:
+                item.score += 0.8
             items.append(item)
         await asyncio.sleep(0.8)
     return items
@@ -1035,9 +1079,122 @@ async def search_competition_context(client: HttpClient, folder: str, max_result
     return results[:max_results]
 
 
+# --------------------------------------------------- 单篇精读：赛事详情核验
+# 「报名已截止」这类**状态描述**才算关闭；「报名截止：2026-12-31」是字段标签，不能误判
+_CLOSED_STATES = ("报名已截止", "报名已结束", "报名停止", "已停止报名", "报名通道已关闭",
+                  "registration closed", "registration is closed", "submissions closed")
+_METRIC_HINTS = ("指标", "评测", "评分", "评分标准", "评估", "auc", "f1", "psnr", "ssim",
+                 "map", "rmse", "mae", "准确率", "召回", "精度", "leaderboard", "score")
+# 「报名截止 2026-10-26」这类写法：抽日期用来判断报名口是否已经关了
+_REG_DEADLINE_RE = re.compile(
+    r"报名(?:截止|结束|关闭)[^\d]{0,8}(\d{4}[-年]\d{1,2}[-月]\d{1,2}日?)")
+
+
+def _snippet_lines(text: str, hints: tuple[str, ...], limit: int = 6) -> list[str]:
+    """按句切分，挑出含关键词的句子，给模型做「评测口径 / 规则」的原始依据。"""
+    if not text:
+        return []
+    parts = re.split(r"(?<=[。！？!?；;])\s*|\n+", text)
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        s = part.strip()
+        if not (12 <= len(s) <= 220) or s in seen:
+            continue
+        low = s.lower()
+        if any(h in low for h in hints):
+            seen.add(s)
+            out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def registration_closed(text: str, now: datetime | None = None) -> bool:
+    """报名口是否已关。两条证据取并集：
+
+    1. 页面出现「报名已结束 / 报名已截止 / registration closed」这类**状态描述**；
+    2. 页面「报名截止 <日期>」里最早的日期已经过去（赛事页常同时列初赛与决赛两套日期，
+       报名口只认最早那个）。
+
+    只看决赛日期在未来就判定「还能报名」是错的——实测天池某赛 10-26 关报名、11-16 才决赛。
+    """
+    if not text:
+        return False
+    low = text.lower()
+    if any(w in low for w in _CLOSED_STATES):
+        return True
+    now = now or datetime.now()
+    regs = [d for d in (parse_deadline(m) for m in _REG_DEADLINE_RE.findall(text)) if d]
+    return bool(regs and min(regs) <= now)
+
+
+# 页面自带的报名控件是最硬的一条证据：天池在报名开着时会直接渲染「报名剩 03 日 14 时」，
+# 而同一页的「2026-05-31 报名与资格赛结束」讲的是**资格赛阶段**，不是报名口。
+# 只认带计数的倒计时（动态渲染，不可能是模板残留），「立即报名」这种按钮文案不算。
+_REG_COUNTDOWN_RE = re.compile(r"报名剩\s*\d+\s*日(?:\s*\d+\s*时)?|距报名(?:结束|截止)")
+
+
+def registration_status(text: str, now: datetime | None = None) -> tuple[bool, str]:
+    """返回 (报名是否已截止, 页面自带状态原句)。
+
+    优先级：页面倒计时 > 「报名已结束」状态词 / 报名截止日期。
+    倒计时一旦出现就是报名口开着，否则模型会把资格赛结束日期写成「报名已结束」。
+    """
+    if not text:
+        return False, ""
+    m = _REG_COUNTDOWN_RE.search(text)
+    if m:
+        return False, m.group(0).strip()
+    return registration_closed(text, now), ""
+
+
+async def fetch_contest_detail(client: HttpClient, item: Item) -> dict:
+    """拉单选赛事的官方页面，抽出时间线 / 奖金 / 评测口径，并判定报名是否还开着。
+
+    这一步是「单篇深度精读」的素材底座：只有标题 + 一句摘要，七个维度里至少四个
+    （数据、指标、周期、奖项）会变成模型编造。顺序是：普通请求 → 无头渲染兜底。
+    """
+    detail = dict(item.extra.get("contest_detail") or {})
+    url = str(item.extra.get("entry_url") or item.url or "")
+    text = ""
+    if url:
+        try:
+            body = await client.text(url)
+        except Exception:
+            body = ""
+        if body and not headless.looks_like_honeypot(body):
+            try:
+                soup = BeautifulSoup(body, "lxml")
+                text = soup.get_text(" ", strip=True)
+            except Exception:
+                text = ""
+        # 赛事页八成是 SPA（天池 / Codabench / 天智杯都一样）：静态 HTML 只有壳，
+        # 650 字左右时直接判为「没拿到正文」，走无头渲染再取一次
+        if len(text) < 1200:
+            try:
+                rendered = await headless.render_text(url, timeout=40.0, virtual_ms=12000)
+            except Exception:
+                rendered = ""
+            if len(rendered) > len(text):
+                text = rendered
+    text = strip_html(text, 9000)
+    detail["page_excerpt"] = text[:3000]
+    detail["timeline"] = [raw for _, raw in find_dates(text, future_only=True)][:8]
+    detail["prize_hint"] = _snippet_lines(text, ("奖金", "奖池", "prize", "usd", "$", "万元"), 3)
+    detail["metrics_hint"] = _snippet_lines(text, _METRIC_HINTS, 6)
+    closed, reg_hint = registration_status(text)
+    detail["registration_closed"] = closed
+    detail["registration_hint"] = reg_hint
+    # 列表接口不给截止时间的源（Codabench）：用官方页里最近的未来日期补一个下限
+    if not item.extra.get("deadline") and detail["timeline"]:
+        item.extra["deadline"] = detail["timeline"][0]
+    detail["fetched"] = bool(text)
+    return detail
+
+
 async def fetch_baseline(client: HttpClient) -> list[Item]:
     """Datawhale「竞赛Baseline」开源仓库：往届赛题的 baseline 复现合集。
-
     这不是「赛事」而是学习资源（category=学习资源，extra.is_learning_resource=True），
     供「baseline 精读」成稿变体整篇解读：原赛题任务、解题思路、关键代码。
     覆盖仓库内**全部**赛题目录——不限底层视觉，深度学习/AI 泛领域（NLP、表格、

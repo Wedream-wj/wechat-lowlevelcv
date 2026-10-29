@@ -346,6 +346,78 @@ industry:
 
 # ---------- 模块 C：竞赛 ----------
 competitions:
+  # 赛事模块的泛 AI 词表（scoring.contest_keyword_weight 读取）
+  # core 2.5 分 / boost 1.0 分 / weak 0.4 分——只用于把「非底层视觉但同样值得打」的
+  # 赛题拉进候选池，最终排序仍以截止时间、可打性为主
+  keywords:
+    core:
+      - 图像复原
+      - 超分辨率
+      - 目标检测
+      - 语义分割
+      - 图像分类
+      - 视频理解
+      - 多模态
+      - 大模型
+      - 具身智能
+      - 遥感
+      - 医学影像
+      - 点云
+      - 深度估计
+      - 图像生成
+      - 视频生成
+      - computer vision
+      - image restoration
+      - segmentation
+      - detection
+      - multimodal
+      - large language model
+      - llm
+      - robotics
+    boost:
+      - 扩散模型
+      - 强化学习
+      - 推荐系统
+      - 时序预测
+      - 知识图谱
+      - 智能体
+      - agent
+      - 3d reconstruction
+      - 三维重建
+      - 语音识别
+      - 表格
+      - 数据挖掘
+      - 检索增强
+      - rag
+      - 提示词
+      - diffusion
+      - transformer
+    weak:
+      - 人工智能
+      - 机器学习
+      - 深度学习
+      - 算法
+      - ai
+      - machine learning
+      - deep learning
+  # 专业赛事雷达（首选来源）：831 条在办/待开始赛事，detail 字段自带
+  # 「赛事背景 / 赛事任务 / 评审规则」成段正文，是单篇精读最需要的素材
+  radar:
+    enabled: true
+    data_url: https://ye4wzp.github.io/ai-contest-radar/data/data.js
+  # 国际 ML 竞赛聚合：Astro 静态页，赛事数据在 data-competitions 属性里
+  mlcontests:
+    enabled: true
+    url: https://mlcontests.com/
+  # Codabench 公开竞赛广场：直连会被反爬蜜罐挡，走无头浏览器取 DRF JSON；
+  # 列表接口不含截止时间，成稿前会用官方页核验（needs_verify）
+  codabench:
+    enabled: true
+    api_url: https://www.codabench.org/api/competitions/?page=1&page_size=40
+  # FlyAI：主站有瑞数验证码（无头也拦），抓静态镜像；赛题多为长期开放的练习赛
+  flyai:
+    enabled: true
+    url: https://static.flyai.com/
   kaggle:
     enabled: true
     # 通过 kaggle API 拉取（需要 ~/.kaggle/kaggle.json 或 KAGGLE_USERNAME/KEY）
@@ -417,11 +489,20 @@ competitions:
     AI 应用创新: [aigc, 黑客松, 应用创新, 融合创新, 创意, 内容生成]
   filter:
     min_score: 3.0
-    top_n: 4
+    # 单篇深度精读：每期只写一场赛事。这里给 3 是为了留出「核验发现已截止就顺延」
+    # 的备选空间，最终成稿仍然只用 1 条（pipeline 里再收敛）
+    top_n: 3
     # 策展源天然相关，不强制命中关键词；平台/搜索来源仍会靠评分排序
     require_keyword_hit: 0
     # 只保留未截止、或截止时间在未来 N 天内的赛事
     upcoming_days: 120
+  # 单篇精读放开的赛道：底层视觉 / CV / 深度学习 / AI 泛领域，均可入选
+  focus:
+    - 底层视觉与图像复原（超分、去噪、去模糊、暗光、压缩伪影）
+    - 计算机视觉与多模态（检测、分割、跟踪、3D、视频理解）
+    - 生成式模型与 AI 应用（扩散、视频生成、Agent、RAG、具身）
+    - 遥感 / 医疗 / 工业质检等真实行业赛题
+    - 数据挖掘与表格建模（结构化数据、时序预测、推荐）
 
 # ---------- 出稿与排期 ----------
 pipelines:

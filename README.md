@@ -89,6 +89,7 @@ python -m scripts.check_sources
 - `WX_APPID / WX_SECRET`：公众号后台「基本配置」获取；**需把服务器出口 IP 加白名单**，且账号需有草稿箱权限（认证订阅号/服务号）；
 - `KAGGLE_USERNAME / KAGGLE_KEY`、`SERPER_API_KEY / TAVILY_API_KEY`：竞赛模块的可选增强源，不配则自动跳过；
 - `LLCV_ADMIN_TOKEN`：设置后，触发出稿/推送的接口要求 `X-Admin-Token` 头。
+- `HEADLESS_BROWSER`：可选，无头浏览器可执行文件路径。不配时自动找系统 Edge/Chrome（Windows 找 `msedge.exe` / `chrome.exe`，macOS 找 `/Applications/Google Chrome.app/...`）。赛事模块的 Codabench 与 Vue SPA 赛站正文依赖它；找不到时该源降级为「不可用」并进源告警，不影响其他模块。
 
 ---
 
@@ -107,13 +108,15 @@ wechat-lowlevelcv/
 │   ├── scheduler.py         # APScheduler cron
 │   ├── sources/             # 抓取层（每源一个模块，见下）
 │   │   ├── base.py          #   异步 HTTP、重试、图片落盘（webp→png 归一）、HTML 清洗
+│   │   ├── headless.py      #   无头 Edge/Chrome 渲染（绕过 iocaine 蜜罐与 Vue SPA）+ 蜜罐识别
 │   │   ├── lowlevelcv.py    #   熵视精选（页面结构实测解析）
 │   │   ├── arxiv.py         #   arXiv API + 架构图提取（HTML→PDF 兜底）
 │   │   ├── paperswithcode.py#   PWC API（已做静默降级）
 │   │   ├── industry.py      #   RSS/Atom 通用 + 逐源体检
 │   │   ├── chinese_media.py #   量子位 / HackCV 直连（中文产业媒体，入选后回抓正文）
 │   │   ├── github_trending.py #  GitHub 开源源（RSS 兜底 + 开源选题）
-│   │   └── competitions.py  #   Kaggle / 天池 / 搜索 / 策展页
+│   │   ├── contest_feeds.py #   AI 赛事雷达 / ML Contests / Codabench / FlyAI
+│   │   └── competitions.py  #   Kaggle / 天池 / 搜索 / 策展页 / 官方详情核验
 │   ├── filters/scoring.py   # 评分、去重、多样性选择
 │   ├── llm/
 │   │   ├── prompts.py       # ★ 三套写作 Prompt + ArticleSpec 规格
@@ -155,13 +158,31 @@ wechat-lowlevelcv/
   `RSS·机器之心 → ProxyError: 502 Bad Gateway`。
 - **写作立场**：开篇必须用「理想 vs 现实 / 学术卷指标 vs 工业卷落地 / 热度 vs 工程价值」的反差做 Hook，禁止「近日/随着/XX 宣布」式流水账；标题走科技产业媒体结构（主体 + 冲突动作 + 标志性结果，数字只来自素材）。
 - **收尾节**：统一叫「**04 | 写在最后**」（旧的「冷静一下」已弃用，`spec_tools.normalize_section_titles` 会在渲染前把别名收敛回正式名）。这一节承担全篇最高的 Insight 密度，按「成本结构 → 演进路径 → 可检验的终极判断」三步收束，信息边界要嵌进判断里说，禁止流水账、心路历程与宏大叙事。
-- **信息卡自适应**：`meta_card` 的标题按主体切换为 `PAPER INFO` / `PROJECT INFO` / `INDUSTRY SNAPSHOT` / `CONTEST INFO`——业界稿里开源项目卡写 `PAPER INFO` 会直接出戏，渲染层（`resolve_card_label`）会按模块与行内容兜底。
+- **信息卡自适应**：`meta_card` 的标题按主体切换为 `PAPER INFO` / `PROJECT INFO` / `INDUSTRY SNAPSHOT` / `COMPETITION INFO` / `EVENT SNAPSHOT`——业界稿里开源项目卡写 `PAPER INFO` 会直接出戏，渲染层（`resolve_card_label`）会按模块与行内容兜底（旧别名 `CONTEST INFO` 会被收敛到 `COMPETITION INFO`）。
 - **产业事件卡的行**：只保留「事件 / 时间 / 影响面」三行。主体和事件并成一句「谁干了什么」（`Runway 开源世界动作模型 Praxis-1`），**不单列「规模或金额」**——数字写进这句事或标题里；模型漏改时 `spec_tools.normalize_meta_cards` / `merge_event_rows` 会在成稿与渲染两处兜底（金额折进事件句的括号内，不丢信息），开源项目卡（`PROJECT INFO`）不参与合并。
 
 ### 模块 C · 赛事竞赛
 
-- **数据源**：Kaggle 官方 API（结构化最好）；天池（非公开接口，宽松解析 + 降级）；Serper/Tavily 搜索补 CVPR/ECCV Workshop、CCF 赛事；NTIRE/MIPI 策展页兜底。
-- **输出**：每场一张 `contest_card`（赛题方向/奖金池/时间节点/入口）+ 难度点评 + 时间线表格 + 避坑清单。**缺失字段一律写「待官方公布」，绝不编造。**
+- **数据源（六通道）**：
+  - **Kaggle** 官方 API（结构化最好，`teamCount` 可判断赛事量级）；**天池**（非公开接口，宽松解析 + 降级）；
+  - **AI 赛事雷达**（`app/sources/contest_feeds.py::fetch_radar`）：`ye4wzp.github.io/ai-contest-radar` 的 Astro 页面内嵌 `window.__DATA__`，一次吐 800+ 条赛事，是目前覆盖面最广的一路（含天智杯、CCF、地方赛、企业赛）；
+  - **ML Contests**（`fetch_mlcontests`）：`data-competitions` 属性里是一段 HTML 转义过的 JSON，`html.unescape` 后直接 `json.loads`；
+  - **Codabench**（`fetch_codabench`）：DRF 可浏览 API 页里 `pre.prettyprint` 内嵌完整 JSON；该站直连会命中 iocaine 蜜罐（返回《1984》随机段落 + 状态码 200），需无头浏览器兜底；
+  - **FlyAI**（`fetch_flyai`）：主站上瑞数验证码（无头浏览器同样拦），改走静态镜像；这类常年开赛的练习型赛事标 `evergreen` 并降权；
+  - Serper/Tavily 搜索补 CVPR/ECCV Workshop、CCF 赛事；NTIRE/MIPI 策展页兜底。
+- **赛道范围**：不限于底层视觉，覆盖 CV / 深度学习 / 大模型 / 具身 / 多模态 / AI for Science。`competitions.keywords`（core/boost/weak 三档）只在打分阶段叠加权重，不做硬过滤——底层视觉的赛事数量撑不起日更，泛 AI 赛事里反而更容易挑到有方法论的题。
+- **强实时性过滤**：`filter_active` 丢掉已过截止、超出 120 天窗口、无任何时间线索的条目；`registration_closed()` 用双证据判报名状态——命中「报名已结束/已截止」等状态词即关，否则取文本里最早的「报名截止 <日期>」，已过即关。**只看「决赛在未来」不算还能报名**（实测天池踩过的坑：报名 10-26 已闭、决赛 11-16 仍未到）。
+- **页面倒计时优先**（`registration_status`）：天池在报名开着时会渲染「报名剩 03 日 14 时」，而同一页的「2026-05-31 报名与资格赛结束」讲的是**资格赛阶段**。带计数的倒计时一旦出现就直接判「报名开着」（「立即报名」这种按钮文案不算证据），并作为 `registration_hint` 原句进素材与卡片「报名」行——否则模型会把资格赛结束写成「报名已结束」。
+- **质量门槛**：奖金为 Kudos/积分且队伍 < 200 的 Kaggle 课堂练习赛直接丢弃——它们以 18.9 的高分霸榜，会挤掉真赛事；真金白银 +2 分，队伍 ≥200 +1.5 分。
+- **单场精读（核心变化）**：**一期只写一场赛事**。pipeline 先取 5 条候选，逐条抓官方详情页核验报名状态，遇 `registration_closed` 顺延；全截止则取最高分那场并切到「赛题拆解 + 复盘」视角。最终 `selected = [chosen]`，禁止一篇推文盘点多场比赛。
+- **七个维度**：赛事背景 / 赛事任务 / 数据说明 / 评估指标 / 赛事周期 / 奖项设置 / 专业解题思路与 Baseline 引导；其中破局思路（Grandmaster 视角）篇幅不少于三成。**缺失字段一律写「待官方公布」，绝不编造。**
+- **官方详情页抓取**（`competitions.fetch_contest_detail`）：普通请求 → 静态文本 <1200 字则走无头渲染兜底；产出 `official_brief`（官方赛题正文 3500 字）/ `page_excerpt`（2000 字）/ `timeline` / `prize_hint` / `metrics_hint` / `registration_closed`，一并塞进 LLM 素材。
+- **信息卡**：按行内容自适应 `COMPETITION INFO`（赛事名/主办/赛题方向/报名状态/奖金池/时间节点/入口）或 `EVENT SNAPSHOT`（复盘视角下的关键节点快照）。
+- **收尾节**：统一「**06 | 写在最后**」，落到赛题背后的方法论迁移，而不是战绩总结。
+- **成稿兜底（代码层，不靠模型自觉）**：
+  - `strip_meta_time()`：删掉「当前日期 2026-10-28，距报名关闭只剩 3 天」这类元信息句——读者不需要知道编辑哪天写稿，跨天推送后这句话立刻自相矛盾；命中即整句删，删空的块直接移除。
+  - `strip_countdown_title()`：报名已关时摘掉标题里的「N 天报名倒计时/距报名截止只剩 N 天」，删完不足 8 字则放弃（宁可不改也不把标题削成半个词）。
+  - `days_left` 只按 `extra.deadline` 算，未必等于报名截止；`registration_closed` 为真时不下发该字段。
 
 ---
 
@@ -178,7 +199,7 @@ wechat-lowlevelcv/
 ## 6. 微信排版转换器（app/render/wechat.py）
 
 - 全部样式内联（公众号过滤 `<style>` 与 class）；布局用 `section/p/table`，不用 flex/grid；
-- 主色随模块切换（学术蓝 / 青色 / 暖橙），小节编号胶囊、引用块、高亮卡、信息卡（标签按主体自适应为 PAPER INFO / PROJECT INFO / INDUSTRY SNAPSHOT / CONTEST INFO）、赛事卡、深色「一句话总结」卡片；
+- 主色随模块切换（学术蓝 / 青色 / 暖橙），小节编号胶囊、引用块、高亮卡、信息卡（标签按主体自适应为 PAPER INFO / PROJECT INFO / INDUSTRY SNAPSHOT / COMPETITION INFO / EVENT SNAPSHOT）、赛事卡、深色「一句话总结」卡片；
 - 图片 `width:100%` 自适应；表格 `table-layout:auto` + 首列方法名不换行，列数上限 5 列（见 `app/spec_tools.py`：组稿前把素材表压到「方法 + 4 个核心指标」，被裁指标由正文文字承担），5 列以上自动收窄内边距与字号，手机端无需横向滚动；
 - 小节编号在代码层强制连续：`renumber_sections()` 按出现顺序重排 01,02,03…，单篇素材省略「总结」也不会出现 04 → 06 的断层；
 - 预览页两个复制入口（Clipboard API + execCommand 兜底）：**「复制 Markdown」**（首选——公众号编辑器支持 Markdown 粘贴，另带「查看 Markdown」面板可手动全选复制）与「复制富文本」；后者粘贴进公众号编辑器即保留内联样式，公众号不认 Markdown 时用它兜底；
@@ -207,7 +228,7 @@ wechat-lowlevelcv/
 python -m unittest discover -s tests -v
 ```
 
-覆盖：lowlevelcv 解析器（用真实页面夹具）、评分与筛选、JSON 修复、Spec 校验、微信渲染（内联样式/转义/内联语法）、Markdown 导出。
+覆盖（146 例）：lowlevelcv 解析器（用真实页面夹具）、评分与筛选、JSON 修复、Spec 校验、微信渲染（内联样式/转义/内联语法）、Markdown 导出、图片格式归一、四个赛事源的解析与蜜罐识别、报名状态判定与练习赛门槛。
 
 ## 9. 部署建议
 
@@ -224,3 +245,6 @@ python -m unittest discover -s tests -v
 - GitHub 搜索接口未鉴权时限流 10 次/分钟，代码已按 6.5 秒间隔串行；填 `industry.github.token` 可提速到 30 次/分钟；
 - 本机实测（2026-10 网络环境）：`openai.com/news/rss.xml`、`bair.berkeley.edu`、`api.github.com` 可访问；`jiqizhixin.com`、`huggingface.co`、`research.google` 及 RSSHub 公共实例被代理拦截（502）。这类地域性差异应通过 `/api/sources` 的体检结果确认，不要凭代码假设；
 - 草稿箱接口要求认证订阅号/服务号；未认证账号请用预览页的「复制 Markdown」或「复制富文本」手动粘贴。
+- 赛事源的时效性天然衰减快：雷达条目里 `signup=closed` 的直接丢，但「报名已结束」常常只写在详情页正文里，所以精读前必须逐条抓官方页核验（`fetch_contest_detail`），这一步单条约 3–8 秒；候选全部截止时会退化成复盘稿，而非硬凑一场。
+- FlyAI 主站上瑞数（验证码 + 动态 JS），无头浏览器同样被拦，只走静态镜像；镜像更新有延迟，新赛事可能晚几天出现。
+- Codabench 对无 `User-Agent` 的直连返回蜜罐页（《1984》随机段落、状态码 200），必须靠 `looks_like_honeypot` 识别后转无头渲染，否则会把小说段落当赛题喂给模型。

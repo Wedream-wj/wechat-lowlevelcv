@@ -48,6 +48,7 @@ from .spec_tools import (
     normalize_section_titles,
     prune_spec_tables,
     renumber_sections,
+    strip_countdown_title,
 )
 
 DATE_FMT = "%Y.%m.%d"
@@ -236,9 +237,10 @@ async def run_module(module: str, *, publish: bool | None = None,
                     "或在 .env 配置 GITHUB_TOKEN 提升配额至 5000 次/小时。"
                 )
         elif module == "contest":
-            # 默认（赛事速递）：学习资源（往届 baseline）不属于赛事内容，不进入本篇——
-            # baseline 解读由独立的成稿变体负责
-            selected = scoring.select(contests_all, topics, module, top_n=top_n, seen=seen)
+            # 默认（单场精读）：学习资源（往届 baseline）不属于赛事内容，不进入本篇；
+            # 候选要多取几条——报名口关了的会被核验挡下，靠备选顺延（最多核验 5 条）
+            want = max(int(top_n or 0), 5)
+            selected = scoring.select(contests_all, topics, module, top_n=want, seen=seen)
         else:
             selected = scoring.select(items, topics, module, top_n=top_n, seen=seen)
         if not selected:
@@ -256,8 +258,12 @@ async def run_module(module: str, *, publish: bool | None = None,
                 f"通过 {funnel['pass']}。最高分候选：{top_desc}。"
                 f"源告警 {len(errors)} 个。"
             )
-        _log("选用 " + "；".join(f"{i.title[:24]}({i.score})" for i in selected))
-        report("筛选", 32, f"筛选完成：选用 {len(selected)} 条 / 共 {len(items)} 条", True)
+        _log("候选 " + "；".join(f"{i.title[:24]}({i.score})" for i in selected))
+        if module == "contest" and variant != "baseline":
+            # 精读只要一场：这里选出的是「按分数排的待核验候选」，最终由官方页核验收敛到 1 条
+            report("筛选", 32, f"筛选完成：{len(selected)} 场候选（将核验后选定 1 场精读）", True)
+        else:
+            report("筛选", 32, f"筛选完成：选用 {len(selected)} 条 / 共 {len(items)} 条", True)
 
         report("配图", 35, "补抓论文实验数据表与结论数字…", True)
         async with HttpClient() as client:
@@ -328,6 +334,40 @@ async def run_module(module: str, *, publish: bool | None = None,
                     res_item.extra["baseline_detail"] = detail
                     _log(f"baseline 详情：files {len(detail.get('files') or [])} 个，"
                          f"README 摘录 {len(detail.get('readme_excerpt') or '')} 字")
+            # 单场精读：拉官方页面做「时效核验 + 素材补全」，核验不过就顺延下一候选。
+            # 只拉入选的这几条（最多 4 次），不会把整池赛事都跑一遍。
+            if module == "contest" and variant != "baseline" and selected:
+                report("配图", 44, "核验赛事官方页面（时效与赛题细节）…", True)
+                chosen = None
+                for cand in selected[:5]:
+                    try:
+                        detail = await asyncio.wait_for(
+                            _competitions.fetch_contest_detail(client, cand), timeout=75.0)
+                    except asyncio.TimeoutError:
+                        detail = {"fetched": False, "error": "官方页核验超时"}
+                    except Exception as exc:
+                        detail = {"fetched": False, "error": f"{type(exc).__name__}: {exc}"}
+                    cand.extra["contest_detail"] = detail
+                    if detail.get("registration_closed"):
+                        _log(f"核验：{cand.title[:28]} 官方页显示报名已截止，顺延下一候选")
+                        continue
+                    chosen = cand
+                    _log(f"核验通过：{cand.title[:28]}（页面 {len(detail.get('page_excerpt') or '')} 字，"
+                         f"时间线 {len(detail.get('timeline') or [])} 条，"
+                         f"指标依据 {len(detail.get('metrics_hint') or [])} 条）")
+                    break
+                if chosen is None:
+                    # 候选全是「报名已截止但赛程仍在」的场次：仍然成稿，但改成复盘视角
+                    # （Prompt 会读 registration_closed 关掉报名入口与倒计时），不开天窗也不误导
+                    chosen = selected[0]
+                    chosen.extra.setdefault("contest_detail", {})["registration_closed"] = True
+                    # days_left 是按 extra.deadline 算的，而天池这类页面的 deadline 常是
+                    # 「整体比赛结束」，不是报名截止。报名已关时留着它，模型会写出
+                    # 「3 天报名倒计时」这种与正文自相矛盾的标题，直接摘掉。
+                    chosen.extra.pop("days_left", None)
+                    _log("核验：候选报名均已截止，改为「赛题拆解 + 复盘」视角撰写")
+                selected = [chosen]
+                _log(f"单场精读选题：{chosen.title[:40]}（{chosen.score} 分）")
             figures = await build_figures(client, selected, module)
         _log(f"配图 {len(figures)} 张")
         report("配图", 48, f"配图完成：{len(figures)} 张", True)
@@ -441,6 +481,14 @@ async def run_module(module: str, *, publish: bool | None = None,
             _log("章节编号已重排为连续序号："
                  + " / ".join(str(b.get("text", "")) for b in spec.get("sections") or []
                               if b.get("type") == "h2"))
+        # 报名已关时，标题不能带「N 天报名倒计时」——赛程还在，但报名口关了，
+        # 这种标题会和正文的「报名已结束」直接打架（Prompt 有禁令，这里兜底）
+        if module == "contest" and selected:
+            closed = bool((selected[0].extra.get("contest_detail") or {})
+                          .get("registration_closed"))
+            old_title = spec.get("title", "")
+            if strip_countdown_title(spec, closed):
+                _log(f"报名已关，标题去掉倒计时短语：{old_title[:28]}… → {spec['title'][:40]}")
         _log(f"成稿完成（{llm_mode}）：{spec.get('title', '')}")
         report("成稿", 85, f"成稿完成（{llm_mode}）：{spec.get('title', '')}", True)
 
