@@ -159,6 +159,40 @@ def recent_history_titles(module: str, days: int = 90, limit: int = 300) -> list
     return titles
 
 
+def recent_history_entries(module: str, days: int = 90, limit: int = 200) -> list[dict]:
+    """读「最近出稿」的素材条目（标题 + 摘要 + URL + 本期时间），供事件级查重。
+
+    与 recent_history_titles 的区别：标题相似度拦不住「同一事件换个数字再写一篇」，
+    事件判重需要摘要（补充实体）和本期出稿时间（限制查重窗口），所以单独开一个入口。
+    """
+    entries: list[dict] = []
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT items_json, created_at FROM issues WHERE module=? AND created_at >= datetime('now', ?)"
+            " ORDER BY created_at DESC LIMIT ?",
+            (module, f"-{days} days", limit),
+        ).fetchall()
+    for row in rows:
+        try:
+            items = json.loads(row["items_json"] or "[]")
+        except (ValueError, TypeError):
+            continue
+        for entry in items if isinstance(items, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title") or "").strip()
+            if not title:
+                continue
+            entries.append({
+                "title": title,
+                "summary": str(entry.get("summary") or "")[:600],
+                "url": str(entry.get("url") or ""),
+                "source": str(entry.get("source") or ""),
+                "created_at": row["created_at"],
+            })
+    return entries
+
+
 def recent_items(module: str, limit: int = 50, unused_only: bool = False) -> list[Item]:
     sql = "SELECT payload FROM items WHERE module=?"
     if unused_only:

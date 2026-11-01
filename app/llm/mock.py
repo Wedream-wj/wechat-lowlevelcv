@@ -164,7 +164,7 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
     date_str = date.today().strftime("%Y.%m.%d")
 
     if module == "contest" and variant == "baseline":
-        # NTIRE 官方报告走另一套结构（赛道定义 / 榜单 / 冠军方案 / 社区复盘）
+        # NTIRE 官方报告走另一套结构（赛道定义 / 榜单 / 冠军方案 / 复现要点）
         ntire_item = next((i for i in items if i.extra.get("ntire_report")), None)
         if ntire_item is not None:
             rep = ntire_item.extra.get("ntire_report") or {}
@@ -203,10 +203,14 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
                                    "header": ["名次", "队伍", "分数"],
                                    "rows": [[str(b.get("rank")), b.get("team"), b.get("score")]
                                             for b in board[:5]]})
-            n_sections.append({"type": "h2", "text": "05 | 社区复盘：冠军选手怎么调"})
+            n_sections.append({"type": "h2", "text": "05 | 复现要点：冠军方案的工程细节"})
             if comm:
+                # 复现记录只是素材：正文按工程逻辑重述，不署来源平台（观点内化铁律）
                 n_sections.append({"type": "bullets", "items": [
-                    f"{c.get('source')}：{_desc(c.get('title'), 60)}" for c in comm[:3]]})
+                    "验证集按设备与场景切分，先保证与线上分布一致，再谈结构改动。",
+                    "训练分两段：完整退化数据上收敛，再用难例子集做一轮精调。",
+                    "推理侧多尺度与翻转集成的收益确定，代价是时延上升，按赛制预算取舍。",
+                ]})
             else:
                 n_sections.append({"type": "p",
                                    "text": "复现时优先对齐提交格式与推理预算，再谈结构替换。"})
@@ -216,12 +220,12 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
                                        "可迁移的部分是数据管线与评测对齐方法，而不是某一个模块。"})
             return {
                 "title": f"NTIRE {year} {_desc(track, 18)}：冠军方案精读",
-                "subtitle": f"{date_str} · 官方报告 + 社区复盘",
+                "subtitle": f"{date_str} · 官方报告 + 冠军方案",
                 "digest": "自动占位稿：验证「NTIRE 官方报告精读」链路与排版。",
                 "lead": ["本篇为 NTIRE 报告精读的离线占位稿，用于验证抓取与排版链路。",
                          "配置大模型后将输出完整的赛道定义、榜单拆解与冠军方案解读。"],
                 "sections": n_sections,
-                "takeaway": "先读官方报告的评测口径，再看榜单差距，最后按社区复盘补齐工程细节。",
+                "takeaway": "先读官方报告的评测口径，再看榜单差距，最后按冠军方案的工程细节补齐复现路径。",
                 "sources": [{"name": ntire_item.title, "url": ntire_item.url}],
             }
 
@@ -365,6 +369,10 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
         }
 
     if module == "industry":
+        # 单一事件结构：离线兜底稿同样只写一条主线，不退回「线索清单」式盘点——
+        # 一期多条动态正是「正文串题、夹杂无关论文/仓库」的根源。
+        extra = main.extra or {}
+        body = _desc(str(extra.get("full_text") or ""), 420) or _desc(main.summary or "", 300)
         sections: list[dict] = [
             # 产业事件卡：主体与事件并成一行，不设「规模或金额」行（渲染层同规则兜底）
             {"type": "meta_card", "label": "INDUSTRY SNAPSHOT", "rows": [
@@ -372,35 +380,39 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
                 ["时间", date_str],
                 ["影响面", "底层视觉的工程选型与选题判断"],
             ]},
-            {"type": "h2", "text": "01 | 线索清单"},
-            {"type": "bullets", "items": [f"{i.title}（来源：{i.source}）" for i in items[:4]]},
+            {"type": "h2", "text": "01 | 发生了什么"},
+            {"type": "p", "text": body or
+             "本期主线事件的公开信息有限，以下只按已披露的事实做结构化梳理，不做推测。"},
         ]
         # 有配图就插进去：离线模式也要能验证「图文并茂」这条硬要求
-        for fid, meta in list(figures.items())[:2]:
+        for fid, meta in list(figures.items())[:1]:
             sections.append({"type": "figure", "ref": fid,
                              "caption": meta.get("caption") or meta.get("title", "")})
         sections += [
-            {"type": "h2", "text": "02 | 怎么读这些消息"},
-            {"type": "p", "text": "建议优先看三类信号：是否开源、是否给出可复现的评测、以及推理成本是否落在可落地区间。"},
+            {"type": "h2", "text": "02 | 技术上看，真正的变化在哪"},
+            {"type": "p", "text": "这条消息真正改变的是成本结构：哪一项成本被压下去、"
+                                    "哪一项被抬上来，决定了它是短期演示还是可交付能力。"},
+            {"type": "h2", "text": "03 | 对读者意味着什么"},
+            {"type": "bullets", "items": [
+                "做研究的：先确认结论成立的前提条件，再判断是否值得跟进这条路线。",
+                "做工程的：模型能力之外，还要算清显存、延迟与维护成本。",
+                "做产品的：区分「演示可用」与「全天候可用」，长尾场景才是成本所在。",
+            ]},
             # 离线兜底稿也要有收尾判断，否则降级出稿会缺掉整篇的落点
-            {"type": "h2", "text": "03 | 写在最后"},
-            {"type": "p", "text": "把这几条线索放在一起看，被改变的不是某个指标，而是成本的分摊方式："
-                                    "数据采集与算力投入在往上游集中，落到工程侧的则是集成与维护成本。"
-                                    "接下来真正稀缺的，是能把「修到什么程度算够用」定义清楚的人。"},
-            {"type": "p", "text": "如果这一轮的开源方案在半年内把推理成本压到端侧可承受的区间，"
-                                    "那么闭源方案的优势会退回到数据与合规，而不是模型本身；"
-                                    "反之，成本降不下来，这套能力就只会留在云端演示里。"},
-            {"type": "quote", "text": "先分清「能力演示」和「可落地能力」，再决定要不要改自己的技术栈。"},
+            {"type": "h2", "text": "04 | 写在最后"},
+            {"type": "p", "text": "把这件事放回成本结构里看，被改变的不是某个指标，而是投入的分摊方式："
+                                    "上游的采集与算力在集中，落到工程侧的则是集成与维护成本。"
+                                    "接下来真正稀缺的，是能把「做到什么程度算够用」定义清楚的人。"},
         ]
         return {
-            "title": "底层视觉的工程侧，正在发生什么",
-            "subtitle": f"{date_str} · 自动整理的行业线索",
-            "digest": "自动模式下汇总近期与底层视觉相关的行业动态。",
+            "title": _desc(main.title, 30) or "产业侧的一条变化",
+            "subtitle": f"{date_str} · 单条产业事件的自动整理稿",
+            "digest": _desc(main.summary or main.title, 90),
             "lead": ["本期为自动整理稿，用于验证抓取与排版链路。",
                      "配置大模型后将输出完整的事件解读与判断。"],
             "sections": sections,
-            "takeaway": "先分清「能力演示」和「可落地能力」。",
-            "sources": [{"name": i.title, "url": i.url} for i in items[:4]],
+            "takeaway": "先分清「能力演示」和「可落地能力」，再判断这条消息对自己的技术栈有没有影响。",
+            "sources": [{"name": main.title, "url": main.url}],
         }
 
     def _fmt_deadline(item: Item) -> str:

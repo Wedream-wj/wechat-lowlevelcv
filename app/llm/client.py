@@ -454,3 +454,23 @@ class LLMClient:
             return title or None
         except LLMError:
             return None
+
+    async def rewrite_industry_title(self, spec: dict, item, issues: list[str]) -> str | None:
+        """业界标题的定向重写：把绕弯句式拉回「谁 + 干了什么 + 为什么反常」。
+
+        与赛事标题重写分开：赛事要的是「把赛题翻译成人话」，业界要的是
+        「一句话交代产业动作」，判据与示例完全不同（见 build_industry_title_rewrite_messages）。
+        失败返回 None，调用方保留原题或退到素材原题兜底。
+        """
+        if not self.enabled:
+            return None
+        from .prompts import build_industry_title_rewrite_messages
+
+        raw, _meta = await self._chat(build_industry_title_rewrite_messages(spec, item, issues))
+        usage.add("industry-title", _meta["prompt"], _meta["completion"])
+        try:
+            data = extract_json(raw)
+            title = str(data.get("title") or "").strip()
+            return title or None
+        except LLMError:
+            return None

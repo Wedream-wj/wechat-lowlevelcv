@@ -32,6 +32,13 @@ _SECTION_TITLE_ALIASES: dict[str, str] = {
     "写在结尾": "写在最后",
     "结语": "写在最后",
     "尾声": "写在最后",
+    # 赛事 / Baseline 稿的 05 节：早期叫「社区复盘」，标题本身就在暗示搬运。
+    # 现在统一为工程视角的正式名——文章讲的是主笔对方案的复现判断，不是社区帖子目录。
+    "社区复盘": "复现要点：冠军方案的工程细节",
+    "社区复盘：冠军选手怎么调": "复现要点：冠军方案的工程细节",
+    "社区经验": "复现要点：冠军方案的工程细节",
+    "社区方案复盘": "复现要点：冠军方案的工程细节",
+    "社区方案": "复现要点：冠军方案的工程细节",
 }
 
 # 标题可能带副标题（「冷静一下：信息边界」），比对时只取主干
@@ -191,6 +198,37 @@ _WORDING_FIXES: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"搬运|白嫖"), "复用"),
 )
 
+# 业界模块的夸张词替换：Prompt 已禁用，这里兜一道。只换口径，不动事实与数字。
+_INDUSTRY_HYPE_FIXES: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"震惊|炸裂|王炸|封神|史诗级|吊炸天|燃爆"), "值得注意"),
+    (re.compile(r"彻底改变(?:了)?世界|重新定义(?:了)?行业|改写(?:了)?行业规则"), "改变了行业的成本结构"),
+    (re.compile(r"遥遥领先"), "明显领先"),
+    (re.compile(r"史上最强"), "当前最强"),
+    (re.compile(r"颠覆性(?:的)?"), "结构性的"),
+    (re.compile(r"碾压|吊打|秒杀|完爆"), "显著优于"),
+)
+
+# 赛事 / Baseline 模块的学术化替换：赛事稿过去只过通用禁用词，实测成稿里出现
+# 「结论互相打架」「这个指标太卷了」「大佬们」「碾压」这类街头表达。整句改写给不出
+# 通用规则，所以只做高频短语的等价替换——不改事实、不动数字，只换口径。
+_CONTEST_ACADEMIC_FIXES: tuple[tuple[re.Pattern, str], ...] = (
+    # 「两个结论互相打架」→ 定量权衡矛盾（用户给的对照口径）
+    (re.compile(r"(?:两边|两者|几组|多组)?(?:结论|指标|结果|榜单)(?:之间)?(?:互相|相互|彼此)?(?:打架|掐架)"
+                r"|(?:两边|两者|几组)?(?:结论|指标)(?:之间)?(?:明显)?(?:互相)?矛盾(?:得很|得厉害)"),
+     "不同评估指标之间存在明显的定量权衡矛盾（Quantitative Trade-off）"),
+    (re.compile(r"(?:这个|该|这项)?(?:指标|榜单|赛道|方向)[^。，；]{0,4}"
+                r"(?:太|有点|挺|特别|非常)?卷(?:了|得厉害|到不行|起来)?"),
+     "该指标上的竞争已趋于饱和"),
+    (re.compile(r"各位大佬|大佬们|大佬"), "头部选手"),
+    # 被动式先处理：「被 SOTA 碾压」→「明显落后于 SOTA」，直接换成「显著优于」会读成病句
+    (re.compile(r"被碾压"), "处于明显劣势"),
+    (re.compile(r"被([^。，；]{1,10}?)碾压"), r"明显落后于\1"),
+    (re.compile(r"碾压|吊打|秒杀|完爆|暴打"), "显著优于"),
+    (re.compile(r"一顿操作猛如虎"), "多轮叠加的工程改造"),
+    (re.compile(r"(?:特别|非常|超|很)能打"), "表现突出"),
+    (re.compile(r"(?:特别|非常|超|很)猛(?!兽)"), "表现突出"),
+)
+
 # ---------------------------------------------------------------- 叙述纪律
 # 本号定位是「只挑值得读的那几篇」：推送即已筛选，正文不能把「读不读」的选择题
 # 推回给读者。Prompt 里已明令禁止，这里再兜一道——命中即改写或整句删除。
@@ -327,14 +365,362 @@ def scrub_process_narration(spec: dict) -> int:
     return hits
 
 
+# ---------------------------------------------------------------- 业界主题纯粹性
+# 实测事故：一篇「OpenAI 融资目标下调」的商业快讯，01 节里夹了一条
+# 「ECCV 2026 论文 SparkVSR 开源，仓库 745 stars，最近更新 2026-08-03」。
+# 它来自同批候选里的另一条素材——模型把「一期多条动态」写成了简报流水账。
+# Prompt 已立「单一事件」铁律，这里按句/按条做确定性兜底：
+#   ① 论文 / 仓库 / 星标 / 更新日期这类学术与代码库噪声，命中即删；
+#   ② 提到「同批其它候选的主体」的句子，若带「同期/另有/此外」这类拼接词，整句删；
+#   ③ 清单（bullets）是拼盘高发区，出现第二家公司就整条删，不给「顺带一提」留口子。
+_INDUSTRY_NOISE_RE = re.compile(
+    r"(?:arxiv|cvpr|iccv|eccv|neurips|iclr|icml|aaai|siggraph|tpami)\s*(?:20\d{2})?\s*(?:论文|paper)"
+    r"|论文\s*[《「\"']?[A-Za-z][A-Za-z0-9\-]{2,}"
+    r"|\d[\d,]*\s*个?\s*stars?\b"
+    r"|stars?\s*[:：]\s*\d"
+    r"|最近更新\s*20\d{2}\s*[-./年]\s*\d{1,2}"
+    r"|github\.com/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+",
+    re.I,
+)
+# 「同期 / 另有 / 此外」——出现这些词又在讲第二家公司，就是拼盘句式
+_SECOND_NEWS_RE = re.compile(r"同期|与此同时|另有|此外|另外|同一时间|同一天|同日|顺带|另一方面")
+# 对比语境：句子里同时出现主线主体和第二家公司、又用了这些词，属于有意义的横向比较，保留
+_COMPARE_RE = re.compile(r"对标|相比|对比|相较|相比之下|高于|低于|领先|落后|远超|差距")
+# 导语/摘要里的「还有另一件事」：单事件稿里出现就是拼盘，不必等第二个主体露名字
+_ANOTHER_NEWS_RE = re.compile(
+    r"同期还有|与此同时|另有|此外|另外|另一条|另一则|顺带|同一天还|同日还|另一方面")
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def _main_blob(main_item) -> str:
+    """主线的全部文本：标题 + 摘要 + 回抓正文。判断「这句话是不是素材外内容」的基准。"""
+    extra = (getattr(main_item, "extra", {}) or {}) if main_item is not None else {}
+    parts = [getattr(main_item, "title", "") or "", getattr(main_item, "summary", "") or "",
+             str(extra.get("full_text") or "")]
+    for src in extra.get("same_event_sources") or []:
+        parts.append(str(src.get("title") or ""))
+        parts.append(str(src.get("summary") or ""))
+    return _plain(" ".join(parts))
+
+
+def _main_names(main_item) -> set[str]:
+    """主线自己的主体名：句子里没出现它、却在讲别的公司，就是串题。"""
+    if main_item is None:
+        return set()
+    try:
+        from .filters.events import entities, latin_tokens
+
+        blob = f"{getattr(main_item, 'title', '') or ''} {getattr(main_item, 'summary', '') or ''}"
+        names = set(entities(blob)) | set(latin_tokens(blob))
+    except Exception:
+        return set()
+    return {str(n) for n in names if len(str(n)) >= 2}
+
+
+def _mentions(text: str, names: set[str]) -> bool:
+    low = _plain(text)
+    return any(_plain(n) and _plain(n) in low for n in names)
+
+
+def _rival_tokens(allowed: str, rivals) -> set[str]:
+    """同批候选里「不是主线」的主体名：出现在正文里就是串题。"""
+    out: set[str] = set()
+    for item in rivals or []:
+        if item is None:
+            continue
+        try:
+            from .filters.events import entities, latin_tokens
+
+            blob = f"{item.title or ''} {item.summary or ''}"
+            names = set(entities(blob)) | set(latin_tokens(blob))
+        except Exception:      # 实体抽取只是启发式，抽不出来就不参与串题判定
+            continue
+        for name in names:
+            token = str(name).strip()
+            if len(token) < 2:
+                continue
+            if _plain(token) and _plain(token) in allowed:
+                continue          # 主线自己就提到过，不算串题
+            out.add(token)
+    return out
+
+
+def _has_rival(text: str, rival_tokens: set[str]) -> str:
+    low = _plain(text)
+    for token in rival_tokens:
+        if _plain(token) and _plain(token) in low:
+            return token
+    return ""
+
+
+def _drop_empty_sections(spec: dict) -> int:
+    """删掉删空的 h2（连同空标题一起），返回删掉的节数。"""
+    blocks = spec.get("sections") or []
+    kept: list = []
+    dropped = 0
+    for i, block in enumerate(blocks):
+        if isinstance(block, dict) and block.get("type") == "h2":
+            nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+            if nxt is None or (isinstance(nxt, dict) and nxt.get("type") in ("h2", "divider")):
+                dropped += 1
+                continue
+        kept.append(block)
+    if dropped:
+        spec["sections"] = kept
+    return dropped
+
+
+def prune_industry_offtopic(spec: dict, main_item, rivals=None) -> dict:
+    """业界稿的「零噪声」兜底：删掉跨界混入的论文/仓库/其它公司动态。
+
+    返回各类删除计数（noise / rivals / cards / sources / sections），
+    total 为 0 表示这篇本来就干净。只删不改——不动数字、不补句子。
+    """
+    stats = {"noise": 0, "rivals": 0, "cards": 0, "sources": 0, "sections": 0}
+    allowed = _main_blob(main_item)
+    rival_tokens = _rival_tokens(allowed, rivals)
+
+    main_names = _main_names(main_item)
+
+    def edit(sent: str) -> str:
+        if _INDUSTRY_NOISE_RE.search(sent):
+            stats["noise"] += 1
+            return ""
+        if not rival_tokens or not _has_rival(sent, rival_tokens):
+            return sent
+        # 拼接词（同期/此外）→ 删；整句只讲第二家公司、主线主体没露面 → 删；
+        # 同时提到主线且在做横向比较 → 保留（那是有信息的判断，不是串题）
+        if _SECOND_NEWS_RE.search(sent):
+            stats["rivals"] += 1
+            return ""
+        if not _mentions(sent, main_names) and not _COMPARE_RE.search(sent):
+            stats["rivals"] += 1
+            return ""
+        return sent
+
+    _edit_sentences(spec, edit)
+
+    # 清单式罗列：出现第二家公司/第二个项目就整条删
+    kept_blocks: list = []
+    for block in spec.get("sections") or []:
+        if not isinstance(block, dict) or block.get("type") not in ("bullets", "numbered"):
+            kept_blocks.append(block)
+            continue
+        items = [i for i in (block.get("items") or []) if isinstance(i, str)]
+        kept = []
+        for item_text in items:
+            if _INDUSTRY_NOISE_RE.search(item_text):
+                stats["noise"] += 1
+                continue
+            if rival_tokens and _has_rival(item_text, rival_tokens):
+                stats["rivals"] += 1
+                continue
+            kept.append(item_text)
+        if not kept:
+            continue
+        block["items"] = kept
+        kept_blocks.append(block)
+    spec["sections"] = kept_blocks
+
+    # 信息卡：夹带「论文/仓库」的行直接删，卡片只留主线事件的事实
+    for block in spec.get("sections") or []:
+        if not isinstance(block, dict) or block.get("type") != "meta_card":
+            continue
+        rows = [r for r in (block.get("rows") or []) if isinstance(r, (list, tuple))]
+        kept_rows = [list(r) for r in rows
+                     if not _INDUSTRY_NOISE_RE.search(" ".join(str(c) for c in r))]
+        if len(kept_rows) != len(rows):
+            stats["cards"] += len(rows) - len(kept_rows)
+            block["rows"] = kept_rows
+
+    # 来源列表：github 仓库链接、以及主线没提过的其它项目，不属于本篇的引用
+    sources = spec.get("sources")
+    if isinstance(sources, list) and sources:
+        kept_sources = []
+        for entry in sources:
+            if not isinstance(entry, dict):
+                kept_sources.append(entry)
+                continue
+            blob = f"{entry.get('name') or ''} {entry.get('url') or ''}"
+            if _INDUSTRY_NOISE_RE.search(blob):
+                stats["sources"] += 1
+                continue
+            if rival_tokens and _has_rival(blob, rival_tokens):
+                stats["sources"] += 1
+                continue
+            kept_sources.append(entry)
+        spec["sources"] = kept_sources
+
+    stats["sections"] = _drop_empty_sections(spec)
+
+    # 导语 / 摘要 / takeaway 只清学术噪声：这三处若被整段误删，文章开头就没了
+    def edit_head(sent: str) -> str:
+        if _INDUSTRY_NOISE_RE.search(sent):
+            stats["noise"] += 1
+            return ""
+        if _ANOTHER_NEWS_RE.search(sent):
+            stats["rivals"] += 1
+            return ""
+        return sent
+
+    lead = spec.get("lead")
+    if isinstance(lead, list):
+        kept_lead = []
+        for para in lead:
+            if not isinstance(para, str):
+                kept_lead.append(para)
+                continue
+            sents = [s for s in _SENT_SPLIT_RE.findall(para) if s.strip()]
+            joined = "".join(edit_head(s) for s in sents).strip()
+            if joined:
+                kept_lead.append(joined)
+        spec["lead"] = kept_lead
+    for key in ("digest", "takeaway"):
+        if isinstance(spec.get(key), str):
+            sents = [s for s in _SENT_SPLIT_RE.findall(spec[key]) if s.strip()]
+            spec[key] = "".join(edit_head(s) for s in sents).strip()
+
+    stats["total"] = sum(v for k, v in stats.items() if k != "total")
+    return stats
+
+
+# ---------------------------------------------------------------- 观点内化
+# 赛事 / Baseline 稿的素材里混着社区复盘（CSDN / 知乎 / 公开复现记录）。Prompt 已立铁律：
+# 外部解读必须消化成主笔判断，正文不许出现「社区复盘指出」「CSDN 博主总结」这类转述。
+# 模型仍会漏一两句，这里做句子级兜底：**剥掉转述外壳、保留事实本体**，不改数字与判断。
+_PLATFORM_RE = re.compile(r"CSDN|知乎|掘金|博客园|简书|Medium", re.I)
+
+# 转述主语 + 转述动词：「社区复盘指出，」「CSDN 博主总结：」「检索结果显示，」
+_ATTRIB_PREFIX_RES: tuple[re.Pattern, ...] = (
+    re.compile(
+        r"^\s*(?:据|根据|从|在)?\s*"
+        r"(?:社区复盘|社区里|社区|技术社区|公开复现记录|赛后复盘|公开资料|检索结果|"
+        r"论坛|帖子|网上|有人|有博主|有作者|有选手|不少选手|部分选手|"
+        r"CSDN|知乎|掘金|博客园|简书)"
+        r"[^，,。；;：:]{0,8}?"
+        r"(?:博主|作者|文章|帖子|回答|用户|网友|专栏|问答|选手|队伍)?"
+        r"[^，,。；;：:]{0,6}?"
+        r"(?:指出|提到|总结|认为|发现|表明|强调|给出|表示|显示|说明|写道|称|说)"
+        r"\s*[，,：:]?\s*"
+    ),
+    # 「正如 CSDN 上那篇高赞回答所说，」这类引述外壳
+    re.compile(r"^\s*(?:正如|就像|正像|如同)[^，。；:：]{0,26}?(?:所说|所言|提到的|写到的|总结的)"
+               r"\s*[，,：:]?\s*"),
+    # 「据公开复现记录报道/披露，」
+    re.compile(r"^\s*(?:据|根据)[^，。；:：]{0,20}?(?:报道|复盘|总结|介绍|披露|统计)\s*[，,：:]?\s*"),
+)
+
+# 「社区把频域自适应细化描述为低高频分离优化恢复」→「频域自适应的核心在于低高频分离优化恢复」
+_REPHRASE_RE = re.compile(
+    r"^(?P<pre>.*?)(?:社区复盘|社区|有博主|公开复现记录|CSDN\s*博主|知乎|不少选手|部分选手)"
+    r"[^，。；]{0,6}?把(?P<obj>.{2,26}?)(?:细化)?(?:描述|总结|概括|归纳)为(?P<val>.+)$"
+)
+# 残留的平台名（句子中段没被前缀规则带走）：换成中性表述，绝不把平台名留在正文里。
+# 直接删会留下「在 的复现贴里」这种语法空洞；保留介词与方位词，读起来仍是通顺的中文。
+_PLATFORM_LEFTOVER_RE = re.compile(
+    r"(?P<pre>据|根据|从|在)?\s*(?:CSDN|知乎|掘金|博客园|简书)(?:网|平台)?\s*"
+    r"(?P<loc>上|中|里)?\s*(?:的)?\s*(?:博主|作者|文章|帖子|回答|用户|网友|专栏|问答|复现贴|技术贴)?",
+    re.I,
+)
+
+
+def _neutralize_platform(match: re.Match) -> str:
+    """把平台名换成中性主语，同时保留原句的介词与方位词（在…上 / 据…）。"""
+    return f"{match.group('pre') or ''}公开复现记录{match.group('loc') or ''}"
+
+
+def _tidy_sentence(text: str) -> str:
+    """清掉剥壳后留下的悬空标点与双空格。"""
+    out = re.sub(r"\s{2,}", " ", text or "").strip()
+    out = re.sub(r"^[，,、；;：:\s]+", "", out)
+    out = re.sub(r"([，,、；;：:])\1+", r"\1", out)
+    return out
+
+
+def _internalize_sentence(sent: str) -> str:
+    """单句内化：反复剥转述外壳（最多 3 轮），直到句子变成直述。"""
+    out = sent
+    for _ in range(3):
+        before = out
+        m = _REPHRASE_RE.match(out)
+        if m:
+            out = f"{m.group('pre')}{m.group('obj')}的核心在于{m.group('val')}"
+            continue
+        for pat in _ATTRIB_PREFIX_RES:
+            new = pat.sub("", out, count=1)
+            if new != out:
+                out = new
+                break
+        out = _PLATFORM_LEFTOVER_RE.sub(_neutralize_platform, out)
+        if out == before:
+            break
+    return _tidy_sentence(out)
+
+
+def _edit_lead_takeaway(spec: dict, edit) -> int:
+    """lead 与 takeaway 也要过同一套句级改写（它们不属于 sections）。"""
+    hits = 0
+    lead = spec.get("lead")
+    if isinstance(lead, list):
+        new_lead = []
+        for para in lead:
+            if not isinstance(para, str):
+                new_lead.append(para)
+                continue
+            sents = [s for s in _SENT_SPLIT_RE.findall(para) if s.strip()]
+            new = [edit(s) for s in sents]
+            hits += sum(1 for a, b in zip(sents, new) if a != b)
+            joined = "".join(x for x in new if x).strip()
+            if joined:
+                new_lead.append(joined)
+        spec["lead"] = new_lead
+    take = spec.get("takeaway")
+    if isinstance(take, str) and take.strip():
+        sents = [s for s in _SENT_SPLIT_RE.findall(take) if s.strip()]
+        new = [edit(s) for s in sents]
+        hits += sum(1 for a, b in zip(sents, new) if a != b)
+        spec["takeaway"] = "".join(x for x in new if x).strip()
+    return hits
+
+
+def scrub_community_attribution(spec: dict) -> int:
+    """把社区转述改写成主笔直述，返回被改写的句数。
+
+    两类命中：
+    1. 转述外壳（「社区复盘指出，X」「CSDN 博主总结：X」「正如某篇回答所说，X」）→ 只留 X；
+    2. 二手改写（「社区把 A 描述为 B」）→「A 的核心在于 B」。
+    改完之后正文里不应再出现 CSDN / 知乎等平台名（它们只属于 sources）。
+    """
+    hits = _edit_sentences(spec, _internalize_sentence)
+    hits += _edit_lead_takeaway(spec, _internalize_sentence)
+    # 兜底：万一平台名藏在 table/caption/highlight 的角落里，直接抹掉（正文不留平台名）
+    for block in spec.get("sections") or []:
+        if not isinstance(block, dict):
+            continue
+        if isinstance(block.get("caption"), str) and _PLATFORM_RE.search(block["caption"]):
+            block["caption"] = _PLATFORM_LEFTOVER_RE.sub(_neutralize_platform, block["caption"])
+            hits += 1
+    return hits
+
+
 def normalize_wording(spec: dict, module: str | None = None) -> int:
     """把禁用措辞替换成规范说法，返回命中次数。只改用词，不动事实与结构。
 
-    module="paper" 时追加学术化文风替换（口语比喻 → 标准学术表述）；
+    module="paper" 时追加论文口语比喻的学术化替换；
+    module="contest" 时追加赛事 / Baseline 的街头表达替换（打架 / 太卷 / 大佬 / 碾压）；
     其余模块只过通用禁用词。
     """
     hits = 0
-    fixes = _WORDING_FIXES + (_ACADEMIC_WORDING_FIXES if module == "paper" else ())
+    fixes = _WORDING_FIXES
+    if module == "paper":
+        fixes = fixes + _ACADEMIC_WORDING_FIXES
+    elif module == "contest":
+        fixes = fixes + _CONTEST_ACADEMIC_FIXES
+    elif module == "industry":
+        fixes = fixes + _INDUSTRY_HYPE_FIXES
 
     def _fix(text: str) -> str:
         nonlocal hits

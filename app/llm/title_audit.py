@@ -270,3 +270,95 @@ def compose_contest_title(item, max_len: int = MAX_CONTEST_TITLE) -> str:
     if len(title) > max_len:
         title = body if len(body) <= max_len else body[:max_len]
     return title
+
+
+# ---------------------------------------------------------------- 业界标题自审
+# 业界稿的标题问题不是「黑话」，是「绕」：实测出过
+# 「DeepSeek 开源 Agent 底座：把人类注意力从 3 到 5 个会话里解出来」——
+# 主体、动作、数字都在，但「把 X 从 A 到 B 里解出来」这种句式读者要读两遍。
+# 产业标题的职责是一句话交代「谁、干了什么、为什么反常」，不承担修辞。
+MAX_INDUSTRY_TITLE = 34
+
+_INDUSTRY_TWIST_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"把[^，。：:？]{1,16}从[^，。：:？]{1,16}(?:里|中)(?:解|抽|捞|摘|拔|拽)出"),
+     "句式绕弯——「把 X 从 A 到 B 里解出来」需要读两遍，改成「主体 + 动作 + 结果」"),
+    (re.compile(r"的(?:背后|另一面|真相)$|背后(?:的逻辑|是什么)"),
+     "句式绕弯——「X 的背后」不承载信息，直接把结论写出来"),
+    (re.compile(r"^(?:关于|聊聊|说说|谈谈)"), "空转开头——不要以「关于/聊聊」起手，直接说事"),
+)
+_INDUSTRY_EMPTY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"重磅|官宣|来袭|引爆|刷屏|沸腾|炸场"), "空话营销词——不承载任何事实"),
+)
+# 业界标题里出现论文/仓库统计，说明内容已经串题（Prompt 与清洗层都会拦，标题这里先拦一道）
+_INDUSTRY_NOISE_TITLE = re.compile(
+    r"(?:eccv|cvpr|iccv|neurips|arxiv)\s*(?:20\d{2})?\s*(?:论文|paper)|\d[\d,]*\s*个?\s*stars?",
+    re.I,
+)
+
+
+def title_width(text: str) -> int:
+    """公众号标题的「视觉字数」：汉字 1 格，连续的英文/数字算 1 格。
+
+    直接 len() 会把「DeepSeek 开源 Agent 底座」算成 22 字，实际排出来只有 12 格，
+    按 len 卡上限会把正常标题误判成超长。
+    """
+    cjk = len(re.findall(r"[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]", text or ""))
+    latin = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9.\-]*", text or ""))
+    return cjk + latin
+
+
+def industry_title_issues(title: str, item=None) -> list[str]:
+    """业界标题的三闸自审：主体在不在、句式直不直、有没有空话。
+
+    与赛事标题的区别：这里不查「规模 Hook」（产业新闻不一定有数字），
+    只查「读者能不能一句话说清这条消息是什么」。
+    """
+    text = (title or "").strip()
+    if not text:
+        return ["标题为空"]
+    issues: list[str] = []
+    width = title_width(text)
+    if width > MAX_INDUSTRY_TITLE:
+        issues.append(f"标题约 {width} 字，超过 {MAX_INDUSTRY_TITLE} 字上限")
+    for pattern, why in _INDUSTRY_TWIST_RULES:
+        if pattern.search(text):
+            issues.append(why)
+    for pattern, why in _INDUSTRY_EMPTY_RULES:
+        if pattern.search(text):
+            issues.append(why)
+    if _INDUSTRY_NOISE_TITLE.search(text):
+        issues.append("标题里夹带论文/仓库统计，与产业事件无关")
+    # 主体缺失：素材标题里点得出的品牌，成稿标题一个都没有 → 读者不知道是谁
+    if item is not None:
+        try:
+            from ..filters.events import event_signature
+
+            brands = event_signature(str(getattr(item, "title", "") or "")).brands
+        except Exception:
+            brands = frozenset()
+        low = text.lower()
+        if brands and not any(str(b).lower() in low for b in brands):
+            issues.append("标题没有点出素材里的主体名（读者看不出是谁）")
+    return issues
+
+
+def industry_title_fallback(item) -> str:
+    """没有大模型可用时的确定性兜底：用素材原题，剥掉媒体自己的营销前缀再截断。
+
+    媒体标题常带「刚刚，」「重磅」「官宣」这类词——那是它们的流量写法，
+    本号的口径是克制，所以兜底稿也要先洗一遍再上。
+    """
+    src = re.sub(r"\s+", " ", str(getattr(item, "title", "") or "")).strip()
+    src = re.sub(r"^(?:刚刚|今天|昨日|昨夜|近日|突发)[，,、:：]\s*", "", src)
+    src = re.sub(r"(?:重磅|官宣|突发|独家)", "", src)
+    src = src.strip(" ！!。，,、")
+    if not src:
+        return ""
+    if title_width(src) <= MAX_INDUSTRY_TITLE:
+        return src
+    cut = src[:MAX_INDUSTRY_TITLE]
+    for mark in ("：", ":", "，", ",", "、", " "):
+        pos = cut.rfind(mark)
+        if pos >= 12:
+            return cut[:pos]
+    return cut

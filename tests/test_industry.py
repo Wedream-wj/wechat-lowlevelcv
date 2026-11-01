@@ -221,7 +221,9 @@ class TestClosingSection(unittest.TestCase):
         items = [Item(module="industry", title="某公司发布模型", url="https://a.com", source="量子位")]
         spec = mock_spec("industry", items, {})
         heads = [b["text"] for b in spec["sections"] if b["type"] == "h2"]
-        self.assertEqual(heads[-1], "03 | 写在最后")
+        # 单一事件结构：01 发生了什么 / 02 技术变化 / 03 对读者 / 04 写在最后
+        self.assertEqual(heads[-1], "04 | 写在最后")
+        self.assertEqual(len(heads), 4)
         self.assertNotIn("冷静一下", str(spec))
         html = wechat.render_body(spec, {}, "industry", "2026.10.27")
         md = spec_to_markdown(spec, {})

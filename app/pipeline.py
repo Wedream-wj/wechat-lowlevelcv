@@ -16,9 +16,11 @@ from typing import Callable
 
 from . import db
 from .config import settings, topics
+from .filters import events as event_dedupe
 from .filters import scoring
 from .llm.client import LLMClient, LLMError
 from .llm.prompts import (
+    INDUSTRY_FACT_RETRY,
     INDUSTRY_HOOK_RETRY,
     SUMMARY_FOCUS_RETRY,
     drop_redundant_summary,
@@ -30,6 +32,7 @@ from .llm.prompts import (
     quant_retry_instruction,
     thin_evidence,
     title_is_number_led,
+    unsupported_industry_numbers,
     unsupported_prose_numbers,
     unsupported_table_numbers,
     _featured_item as _featured_item_for_title,
@@ -38,6 +41,8 @@ from .llm.title_audit import (
     compose_contest_title,
     contest_title_issues,
     has_hollow,
+    industry_title_fallback,
+    industry_title_issues,
     polish_title,
 )
 from .models import Article, Item
@@ -57,8 +62,10 @@ from .spec_tools import (
     normalize_meta_cards,
     normalize_section_titles,
     normalize_wording,
+    prune_industry_offtopic,
     prune_spec_tables,
     renumber_sections,
+    scrub_community_attribution,
     scrub_process_narration,
     scrub_reader_burden,
     strip_countdown_title,
@@ -191,6 +198,41 @@ async def _sanity_check_contest_title(spec: dict, item, llm, log) -> bool:
     return True
 
 
+async def _sanity_check_industry_title(spec: dict, item, llm, log) -> bool:
+    """业界标题的「先自审，再发布」：绕弯句式 / 空话 / 缺主体 → 重写或退回素材原题。
+
+    实测事故：「DeepSeek 开源 Agent 底座：把人类注意力从 3 到 5 个会话里解出来」——
+    主体、动作、数字都在，但句式要读两遍。产业标题不承担修辞，只承担信息。
+    返回是否改动了标题。
+    """
+    title = str(spec.get("title") or "")
+    issues = industry_title_issues(title, item)
+    if not issues:
+        return False
+    log("业界标题自审未过：" + "；".join(issues))
+
+    candidates: list[tuple[str, str]] = []
+    if llm is not None and getattr(llm, "enabled", False):
+        try:
+            cand = await llm.rewrite_industry_title(spec, item, issues)
+        except Exception as exc:      # 重写失败不能拖垮出稿
+            log(f"业界标题重写调用失败，走确定性兜底：{exc}")
+            cand = None
+        if cand:
+            candidates.append(("模型重写", cand))
+    fallback = industry_title_fallback(item)
+    if fallback and fallback != title:
+        candidates.append(("素材原题", fallback))
+
+    for source, cand in candidates:
+        if not industry_title_issues(cand, item):
+            spec["title"] = cand
+            log(f"业界标题已重写（{source}）：{title[:24]}… → {cand[:34]}")
+            return True
+    log(f"自审未过的标题无可替换方案，保留原题：{title[:34]}")
+    return False
+
+
 async def run_module(module: str, *, publish: bool | None = None,
                      date_str: str | None = None, top_n: int | None = None,
                      demo: bool = False, variant: str | None = None,
@@ -273,6 +315,28 @@ async def run_module(module: str, *, publish: bool | None = None,
                      + "；".join(t[:28] for t in dropped_all[:3]))
         items = contests_all + learning_fresh
 
+        # 业界稿的两道额外闸门（标题相似度已经在上面的 dedupe_history 挡过一轮）：
+        # 1) 事件级查重：同一事件换个数字再写一篇——「OpenAI 融资砍掉三分之一：300 亿变
+        #    200 亿」与「OpenAI 融资砍掉 100 亿美元」字面相似度不到 0.6，标题比对拦不住，
+        #    必须按「核心实体 + 事件类型 + 时间窗口」判；
+        # 2) 同批合并：同一事件的多篇报道只留一条做主条，其余挂成「交叉核对信源」，
+        #    否则「待出稿队列」内部就会自己撞题。
+        if module == "industry":
+            window = int(topics.industry.get("event_dedupe_days", 14) or 14)
+            entries = db.recent_history_entries(module, days=max(window, 30))
+            items, event_dups = event_dedupe.dedupe_events(items, entries, days=window)
+            if event_dups:
+                history_dropped += len(event_dups)
+                _log(f"事件查重：挡掉 {len(event_dups)} 条与近期出稿同属一个事件的候选："
+                     + "；".join(f"{d['title'][:26]}（{d['event']} ← 已出《{d['matched_title'][:20]}》）"
+                                for d in event_dups[:3]))
+            before_merge = len(items)
+            items, merged_events = event_dedupe.collapse_same_event(items)
+            if merged_events:
+                _log(f"同批合并：{before_merge - len(items)} 条重复事件并入主条（"
+                     + "；".join(f"{k[:20]} ← {'、'.join(i.title[:14] for i in v[:2])}"
+                                 for k, v in list(merged_events.items())[:2]) + "）")
+
         if module == "contest" and variant == "baseline":
             # 变体：整篇「竞赛 baseline 精读」。只选 baseline 本身，不强行搭配当下赛事。
             # 三档降级保证永远有稿可出（此前硬过滤曾把固定池清零导致 0 输出）：
@@ -306,6 +370,11 @@ async def run_module(module: str, *, publish: bool | None = None,
             # 候选要多取几条——报名口关了的会被核验挡下，靠备选顺延（最多核验 5 条）
             want = max(int(top_n or 0), 5)
             selected = scoring.select(contests_all, topics, module, top_n=want, seen=seen)
+        elif module == "industry":
+            # 一期只写一个核心事件：先按分数取 3 条备战，回抓正文后再收敛为 1 条主角。
+            # 直接取 1 条的风险是「最高分那条恰好没有正文」，写出来全是空泛判断。
+            want = min(max(int(top_n or 3), 1), 3)
+            selected = scoring.select(items, topics, module, top_n=want, seen=seen)
         else:
             selected = scoring.select(items, topics, module, top_n=top_n, seen=seen)
         if not selected:
@@ -389,6 +458,19 @@ async def run_module(module: str, *, publish: bool | None = None,
                     msg = f"产业媒体正文回抓失败：{type(exc).__name__}: {exc}"
                     errors.append({"source": "产业媒体正文", "error": msg})
                     _log(msg)
+                # 主角收敛：正文回抓完之后才看得出来谁能撑起一篇解读。
+                # 一期只写一件事——这一步把「3 条备战」收敛成「1 条主角」，
+                # 其余候选不再进入 Prompt，从源头上断掉「顺带一句别家动态」的写法。
+                subject = event_dedupe.pick_subject(selected)
+                if subject is not None:
+                    if subject is not selected[0]:
+                        _log(f"主角按素材完整度收敛：{subject.title[:34]}"
+                             f"（正文 {len(str(subject.extra.get('full_text') or ''))} 字）")
+                    selected = [subject]
+                    sig = event_dedupe.item_signature(subject)
+                    others = event_dedupe.describe_sources(subject)
+                    _log(f"本期单一事件：{sig.describe()}"
+                         + (f"；另有 {others} 同事件报道仅用于交叉核对" if others else ""))
             # baseline 精读变体：给学习资源条目补「成稿核心素材」。
             # 两种素材两条路：
             #   · Datawhale 复现仓库 → README + 文件清单 + 关键代码（讲代码起点）；
@@ -406,7 +488,7 @@ async def run_module(module: str, *, publish: bool | None = None,
                     board = detail.get("leaderboard") or []
                     _log(f"NTIRE 报告：正文 {len(detail.get('report_excerpt') or '')} 字 / "
                          f"榜单 {len(board)} 名 / 方法小节 {len(detail.get('sections') or [])} 个 / "
-                         f"社区复盘 {len(detail.get('community') or [])} 篇")
+                         f"公开复现记录 {len(detail.get('community') or [])} 篇")
                     if champ.get("team"):
                         _log(f"冠军方案：{champ.get('team')}"
                              + (f"（{champ.get('score')}）" if champ.get("score") else "")
@@ -515,6 +597,26 @@ async def run_module(module: str, *, publish: bool | None = None,
                     )
                 except LLMError as exc:
                     _log(f"导语重写失败，保留首稿：{exc}")
+            # 业界稿「实事求是」闸门：金额/估值/比例/算力这类事实性数字，必须能在主线
+            # 素材原文里逐字找到。命中编造就定向重写一次（业界稿最怕的不是平淡，是数字不实）。
+            if module == "industry" and selected and llm.enabled:
+                bad_amounts = unsupported_industry_numbers(spec, selected)
+                if bad_amounts:
+                    report("成稿", 84, "首稿有素材里找不到的数字，要求照原文重写…", True)
+                    _log("首稿含素材原文找不到的事实性数字：" + "、".join(bad_amounts[:6]))
+                    try:
+                        spec = await llm.write(
+                            module, selected, figures, date_str,
+                            on_progress=on_llm,
+                            extra_instruction=INDUSTRY_FACT_RETRY.format(
+                                tokens="、".join(bad_amounts[:8])),
+                        )
+                        left = unsupported_industry_numbers(spec, selected)
+                        if left:
+                            _log("重写后仍有对不上的数字，保留原稿请人工核对："
+                                 + "、".join(left[:6]))
+                    except LLMError as exc:
+                        _log(f"数字重写失败，保留首稿：{exc}")
             # 「总结」节与「核心结论」highlight 互斥：Prompt 有规则但模型偶尔不遵守，
             # 代码层强制执行（首稿与重写两个出口都要过）
             if drop_redundant_summary(spec):
@@ -585,6 +687,28 @@ async def run_module(module: str, *, publish: bool | None = None,
             _log("业界信息卡已合并「主体 + 事件」为单行，规模/金额折入事件描述")
         if normalize_wording(spec, module):
             _log("禁用措辞已替换（口语比喻 → 学术表述 / 抄作业 → 借鉴 等）")
+        # 业界稿「零噪声」兜底：Prompt 立了单一事件铁律，但实测仍出现过商业快讯里
+        # 夹进「ECCV 2026 论文 SparkVSR 开源，仓库 745 stars，最近更新 2026-08-03」
+        # 这种与主线毫无关系的学术/仓库信息。这里按句、按条、按信息卡行做确定性删除——
+        # 只删不改，不动任何数字，也不替模型补句子。
+        if module == "industry" and selected:
+            # 只拿同批里分数靠前的候选当「串题主体」参照：整池 160 条全塞进去，
+            # 会把正文里任何一次正常的横向对比都误判成串题
+            rivals = sorted((i for i in items if i is not selected[0]),
+                            key=lambda x: x.score, reverse=True)[:20]
+            purged = prune_industry_offtopic(spec, selected[0], rivals)
+            if purged.get("total"):
+                _log("主题纯粹性：删掉 "
+                     f"{purged['noise']} 处论文/仓库噪声、{purged['rivals']} 处第二家公司动态、"
+                     f"{purged['cards']} 行信息卡、{purged['sources']} 条来源"
+                     + (f"、{purged['sections']} 个被删空的章节" if purged.get("sections") else ""))
+        # 观点内化：赛事 / Baseline 稿的素材里混着社区复盘（CSDN / 知乎），
+        # 模型容易写成「社区复盘指出…」——那是二手拼贴，不是主笔判断。
+        # Prompt 已立铁律，这里按句剥壳：保留事实本体，平台名换成中性表述。
+        if module == "contest":
+            internalized = scrub_community_attribution(spec)
+            if internalized:
+                _log(f"已内化 {internalized} 处社区转述（去掉「社区指出 / CSDN」等搬运痕迹）")
         # 叙述纪律兜底：推送即已筛选，不把「读不读」推回读者；素材工序（表格错位、
         # 抓取受限）也不许出现在正文里——Prompt 有硬约束，这里再删一道。
         narration = scrub_reader_burden(spec) + scrub_process_narration(spec)
@@ -607,6 +731,10 @@ async def run_module(module: str, *, publish: bool | None = None,
             # 要素齐全但读者读不出「这场比赛考什么」。自审不过 → 定向重写一次（只重出
             # 标题，几十 token）→ 仍不过则退回确定性兜底（删空洞修饰 / 公式化重拼）。
             await _sanity_check_contest_title(spec, selected[0], llm, _log)
+        # 业界标题自审：产业稿的标题问题不是黑话而是「绕」——「把 X 从 A 到 B 里解出来」
+        # 这类句式读者要读两遍。自审不过先让模型只重出标题，仍不过就退回素材原题。
+        if module == "industry" and selected:
+            await _sanity_check_industry_title(spec, selected[0], llm, _log)
         _log(f"成稿完成（{llm_mode}）：{spec.get('title', '')}")
         report("成稿", 85, f"成稿完成（{llm_mode}）：{spec.get('title', '')}", True)
 
