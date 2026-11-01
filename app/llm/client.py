@@ -434,3 +434,23 @@ class LLMClient:
             return title or None
         except LLMError:
             return None
+
+    async def rewrite_contest_title(self, spec: dict, item, issues: list[str]) -> str | None:
+        """赛事标题的通俗化重写：把黑话/文艺腔换成人话，只重出标题。
+
+        与论文的跑分型重写分开：那边要的是「动机驱动」，这边要的是「路人也能读懂」，
+        提示词与判据完全不同（见 build_contest_title_rewrite_messages）。
+        失败返回 None，调用方保留原题。
+        """
+        if not self.enabled:
+            return None
+        from .prompts import build_contest_title_rewrite_messages
+
+        raw, _meta = await self._chat(build_contest_title_rewrite_messages(spec, item, issues))
+        usage.add("contest-title", _meta["prompt"], _meta["completion"])
+        try:
+            data = extract_json(raw)
+            title = str(data.get("title") or "").strip()
+            return title or None
+        except LLMError:
+            return None

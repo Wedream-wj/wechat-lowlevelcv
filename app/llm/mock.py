@@ -12,6 +12,7 @@ from datetime import date
 
 from ..config import topics
 from ..models import Item
+from .title_audit import compose_contest_title
 
 
 def _brief(items: list[Item]) -> list[dict]:
@@ -464,8 +465,11 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
                                 "真正拉开差距的会是数据构建与验证集设计。"},
         {"type": "quote", "text": "先确认评分规则奖励什么，再决定把时间投在哪。"},
     ]
+    # 离线稿也守标题铁律：按「规模数字 + 赛事名 + 这场在测什么」拼，
+    # 不用「XX 赛道的门槛在哪」这种既空又模板化的句式
+    contest_title = compose_contest_title(item) or f"{_desc(item.title, 22)}：单场精读"
     return {
-        "title": f"{_desc(item.title, 22)}：{item.category or 'AI'}赛道的门槛在哪",
+        "title": contest_title,
         "subtitle": f"{item.category or '综合赛事'} · 单场赛事精读",
         "digest": _desc(item.summary or item.title, 100),
         "lead": [f"这期只讲一场：{item.title}。",

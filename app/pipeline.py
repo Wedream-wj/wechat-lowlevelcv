@@ -34,6 +34,12 @@ from .llm.prompts import (
     unsupported_table_numbers,
     _featured_item as _featured_item_for_title,
 )
+from .llm.title_audit import (
+    compose_contest_title,
+    contest_title_issues,
+    has_hollow,
+    polish_title,
+)
 from .models import Article, Item
 from .render import cover as cover_mod
 from .render import cover_select
@@ -131,6 +137,58 @@ def _relative_asset(path: str) -> str:
         return Path(os.path.relpath(path, settings.out_dir)).as_posix()
     except ValueError:
         return Path(path).as_uri()
+
+
+async def _sanity_check_contest_title(spec: dict, item, llm, log) -> bool:
+    """赛事标题的「发布前自审」：黑话/文艺腔 → 重写 → 仍不过则确定性兜底。
+
+    三级递进，每一级都只接受「自审通过」的结果，绝不把标题改坏：
+      1) 定向重写（有大模型时）：只重出标题，把自审报告原样喂给模型；
+      2) 去装饰（polish）：删掉「门口 / 之巅 / 元年」这类删掉不影响语义的词；
+      3) 公式化重拼（compose）：规模数字 + 赛事名 + 这场在测什么。
+    返回是否改动了标题。
+    """
+    title = str(spec.get("title") or "")
+    if not title.strip():
+        return False
+    issues = contest_title_issues(title, item)
+    if not issues:
+        return False
+    log("标题自审未过：" + "；".join(issues))
+
+    candidates: list[tuple[str, str]] = []          # (来源, 标题)
+    if llm is not None and getattr(llm, "enabled", False):
+        try:
+            cand = await llm.rewrite_contest_title(spec, item, issues)
+        except Exception as exc:                     # 重写失败绝不能拖垮出稿
+            log(f"标题重写调用失败，走确定性兜底：{exc}")
+            cand = None
+        if cand:
+            candidates.append(("模型重写", cand))
+
+    polished = polish_title(title)
+    if polished and polished != title:
+        candidates.append(("去装饰", polished))
+    composed = compose_contest_title(item)
+    if composed:
+        candidates.append(("公式化重拼", composed))
+
+    best: tuple[str, str] | None = None
+    for source, cand in candidates:
+        remain = contest_title_issues(cand, item)
+        if not remain:
+            best = (source, cand)
+            break
+        # 没有完全通过的：只在原题确实有黑话/文艺腔时，接受问题更少的候选
+        if has_hollow(title) and len(remain) < len(issues):
+            issues, best = remain, (source, cand)
+    if best is None:
+        log(f"自审未过的标题无可替换方案，保留原题：{title[:40]}")
+        return False
+    source, new_title = best
+    spec["title"] = new_title
+    log(f"标题已通俗化（{source}）：{title[:26]}… → {new_title[:44]}")
+    return True
 
 
 async def run_module(module: str, *, publish: bool | None = None,
@@ -544,6 +602,11 @@ async def run_module(module: str, *, publish: bool | None = None,
             old_title = spec.get("title", "")
             if strip_countdown_title(spec, closed):
                 _log(f"报名已关，标题去掉倒计时短语：{old_title[:28]}… → {spec['title'][:40]}")
+            # 标题合理性自审（先审再发）：赛事稿实测出过
+            # 「76 个生物任务、9 大领域：BioXArena 把 LLM 智能体拉进湿实验门口」——
+            # 要素齐全但读者读不出「这场比赛考什么」。自审不过 → 定向重写一次（只重出
+            # 标题，几十 token）→ 仍不过则退回确定性兜底（删空洞修饰 / 公式化重拼）。
+            await _sanity_check_contest_title(spec, selected[0], llm, _log)
         _log(f"成稿完成（{llm_mode}）：{spec.get('title', '')}")
         report("成稿", 85, f"成稿完成（{llm_mode}）：{spec.get('title', '')}", True)
 
