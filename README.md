@@ -49,7 +49,7 @@
 | 大模型 | **OpenAI 兼容客户端** | DeepSeek / 通义 / 智谱 / Moonshot / 自建 vLLM 都能接，只改环境变量 |
 | 存储 | **SQLite（标准库）** | 素材池 + 成稿 + 运行日志，单文件零运维；量大可平滑换 Postgres |
 | 排版 | **自研 ArticleSpec → 内联 HTML** | 公众号编辑器会过滤 `<style>`/class/部分 flex，只有全内联样式可控；结构化稿保证每期版式 100% 一致 |
-| 图像 | **Pillow** | 本地生成 1200×675 封面（三套配色随模块切换），可选 PyMuPDF 渲染 PDF 首页兜底配图 |
+| 图像 | **Pillow + PyMuPDF** | 封面优先用素材真图（架构图 / teaser / 官方视觉），PyMuPDF 从论文 PDF 抠图；没有合格图就本地绘制 1080×460（2.35:1）品牌底图 |
 
 ### 关键设计决策
 
@@ -87,7 +87,11 @@ python -m scripts.check_sources
 - `LLM_API_KEY / LLM_BASE_URL / LLM_MODEL`：任意 OpenAI 兼容端点；
 - `LLM_REASONING_EFFORT`：推理模型（DeepSeek-R1/V4 等）建议设 `none` 关思考——思维链与正文共享 `max_tokens`，不关会出现「模型返回为空 / JSON 被截断 / 单篇数分钟」；留空则不下发该参数，非推理模型无需设置；
 - `WX_APPID / WX_SECRET`：公众号后台「基本配置」获取；**需把服务器出口 IP 加白名单**，且账号需有草稿箱权限（认证订阅号/服务号）；
+- `WX_ORIGINAL_TYPE / WX_COLLECTION`：推草稿的发布属性，默认 `文字原创` / `每日推送`，每次推送必带（别名「原创」「图文原创」自动归一，写错值在推送前报错）；
+- `WX_DRAFT_EXTRA_FIELDS`：把上面两项直接写进 `draft/add` 载荷（微信当前不支持这两个字段，默认 0；接口开放后置 1 即生效）；
+- `WX_UI_FILL / WX_STORAGE_STATE`：用 Playwright 回后台自动勾原创、选合集。需 `pip install playwright`（复用系统 Edge/Chrome，无需下 chromium）+ 一份已登录的 `storage_state`；未开启或没登录时推送照常，只是在控制台列出待办；
 - `KAGGLE_USERNAME / KAGGLE_KEY`、`SERPER_API_KEY / TAVILY_API_KEY`：竞赛模块的可选增强源，不配则自动跳过；
+  NTIRE 报告的社区复盘检索**不依赖这两个 key**（CSDN 官方搜索接口 + Bing site: 检索都免 key）；
 - `LLCV_ADMIN_TOKEN`：设置后，触发出稿/推送的接口要求 `X-Admin-Token` 头。
 - `HEADLESS_BROWSER`：可选，无头浏览器可执行文件路径。不配时自动找系统 Edge/Chrome（Windows 找 `msedge.exe` / `chrome.exe`，macOS 找 `/Applications/Google Chrome.app/...`）。赛事模块的 Codabench 与 Vue SPA 赛站正文依赖它；找不到时该源降级为「不可用」并进源告警，不影响其他模块。
 
@@ -116,6 +120,7 @@ wechat-lowlevelcv/
 │   │   ├── chinese_media.py #   量子位 / HackCV 直连（中文产业媒体，入选后回抓正文）
 │   │   ├── github_trending.py #  GitHub 开源源（RSS 兜底 + 开源选题）
 │   │   ├── contest_feeds.py #   AI 赛事雷达 / ML Contests / Codabench / FlyAI
+│   │   ├── cvf.py           #   CVF Open Access · NTIRE 官方报告 + 冠军方案定向检索
 │   │   └── competitions.py  #   Kaggle / 天池 / 搜索 / 策展页 / 官方详情核验
 │   ├── filters/scoring.py   # 评分、去重、多样性选择
 │   ├── llm/
@@ -126,8 +131,12 @@ wechat-lowlevelcv/
 │   │   ├── wechat.py        # ★ ArticleSpec → 微信内联样式 HTML
 │   │   ├── markdown.py      # ArticleSpec → Markdown（可编辑中间稿）
 │   │   ├── preview.py       # 手机画框预览页（一键复制 Markdown / 富文本）
-│   │   └── cover.py         # 1200×675 封面生成
-│   └── publish/wechat_api.py# token 缓存 / uploadimg / add_material / draft/add
+│   │   ├── cover.py         # 1080×460（2.35:1）封面渲染：素材图 + 左暗蒙版 / 品牌底图
+│   │   └── cover_select.py  # ★ 封面选图：按模块差异化挑图、体检、打分，不达标退底图
+│   └── publish/           # 微信草稿箱：attrs.py（原创/合集固化）· mp_ui.py（后台补勾）· wechat_api.py
+│       ├── attrs.py        # ★ 发布属性：原创声明「文字原创」+ 合集「每日推送」的固化/断言/审计
+│       ├── mp_ui.py        # 可选 Playwright 回后台勾原创、选合集（缺依赖/缺合集都有明确日志）
+│       └── wechat_api.py   # token 缓存 / uploadimg / add_material / draft/add
 ├── config/topics.yaml       # ★ 选题词表、数据源、阈值、排期、主题色——改这里不改代码
 ├── web/index.html           # 运营控制台
 ├── scripts/{demo,run_once,check_sources}.py
@@ -184,6 +193,47 @@ wechat-lowlevelcv/
   - `strip_countdown_title()`：报名已关时摘掉标题里的「N 天报名倒计时/距报名截止只剩 N 天」，删完不足 8 字则放弃（宁可不改也不把标题削成半个词）。
   - `days_left` 只按 `extra.deadline` 算，未必等于报名截止；`registration_closed` 为真时不下发该字段。
 
+#### C-1 · baseline 精读：两条素材路线
+
+控制台上「生成 baseline 精读」（绿色按钮）走的是 `variant="baseline"`，整篇只精读**一份**学习资源。素材有两条路，Prompt 也不同：
+
+| 路线 | 素材 | 讲什么 | Prompt |
+|---|---|---|---|
+| Datawhale 复现仓库 | README + 文件清单 + 关键代码片段 | 代码起点、数据洞察、升级 Roadmap | `contest_baseline` |
+| **NTIRE 官方挑战赛报告** | 报告正文 + 榜单 + 冠军方案 + 社区复盘 | 赛道定义、评测协议、冠军拆解、榜单差距 | `contest_ntire` |
+
+`build_user_prompt` 按素材里有没有 `ntire_report` 自动选 Prompt，不需要额外开关。
+
+#### C-2 · CVF Open Access / NTIRE 报告链路（`app/sources/cvf.py`）
+
+NTIRE（CVPR/ICCV/WACV Workshop 旗下最大的底层视觉挑战赛）每年会给每条赛道发一份
+challenge report：赛题定义、数据规格、评测协议、完整榜单、各队方法描述全在里面，
+是这条管线里信息密度最高、也最容易溯源的素材。
+
+1. **发现**：`openaccess.thecvf.com/menu` → 近 N 届 workshop 入口 → 该届 NTIRE 页。
+   注意最新一届的 href 是 `CVPR2026_workshops`（**没有** `/menu` 后缀），漏这一种最新一届就永远抓不到。
+2. **建条**：NTIRE 页有 60+ 篇 workshop 论文，只留标题同时含 `NTIRE + 年份 + challenge` 的官方报告；
+   实测 CVPR 2026 有 38 份。赛道名会去掉「The 3rd」「The Eleventh」这类序数，但**保留 Track 号**——
+   社区检索是否命中同一赛道全靠它。
+3. **深挖**（`enrich_report`）：
+   - 摘要页取 `#abstract` 与 PDF 链接；
+   - PDF **分段下载**前 `pdf_bytes`（默认 0.8MB）：整本 2–3MB 在慢网络下要三分钟，前 0.8MB 已经覆盖
+     摘要、赛道定义、榜单表与全部方法小节，剩下的是参考文献；PyMuPDF 打开不完整 PDF 也能出前 20 页文本；
+   - `parse_sections` 先**定位到方法章节**再按 `3.x` 切——报告前半部分是 2.1 训练集 / 2.2 验证集 / 2.3 指标，
+     直接切会把「训练集划分」写成参赛方案；`Submitted Methods`、`Quantitative Comparison` 这类导语型小节跳过；
+   - `parse_leaderboard` 认「Award Ranking / Leaderboard」表（名次 + 队名 + 分数三元组）；
+     另一种「团队名 + 一串数字」的多列排版抽不成结构，改由 `results_table` 原样交给模型自己读数；
+   - `report_stats` 只把 `participants/registrations` 计为人数，`submissions` 是提交次数，混用会让正文写错规模。
+4. **冠军方案定向检索**（`search_community`）：
+   - 查询词按 `NTIRE + 年份 + 赛道/方法名 + 冠军/方案` 组合；
+   - CSDN 走官方搜索接口（免 key，JSON，摘要质量高）；知乎站内接口要签名，改走 Bing 的 `site:zhihu.com`；
+   - 相关性硬门槛：标题/摘要里必须有 `NTIRE`，否则要求「年份 + 赛道词」同时命中——CSDN 常年混进
+     「低照度图像处理综述」这类泛文；
+   - `same_track`：命中结果若写的是同届**另一条赛道**（Track 2 vs Track 1），保留但降权并标记，
+     Prompt 明令它只能佐证整届趋势，不能说成这条赛道的冠军方案。
+5. **排序**：底层视觉赛道词命中的报告优先（超分/去噪/低光/RAW/HDR…），
+   「画质评价 / 异常检测 / 审美评测」这类评审型赛道降权，让栏目主赛道先入选。
+
 ---
 
 ## 5. Prompt 设计（app/llm/prompts.py）
@@ -191,6 +241,10 @@ wechat-lowlevelcv/
 三套 prompt 共享一个 System（人设 + 文风 + 硬性约束 + JSON 规格）+ 模块化任务卡：
 
 - **统一文风约束**：拒绝摘要腔；「问题—做法—代价」叙事；段落 ≤ 4 行；术语中英对照；禁用词表（震惊/炸裂/王炸…）；
+- **四套任务卡**：`PAPER_PROMPT` / `INDUSTRY_PROMPT` / `CONTEST_PROMPT`（单场精读）+
+  `CONTEST_BASELINE_PROMPT`（Datawhale 仓库精读）/ `CONTEST_NTIRE_PROMPT`（官方报告精读）；
+- **措辞兜底**：`spec_tools.normalize_wording()` 在成稿出口把「抄作业 / 抄走 / 照抄 / 套用 / 搬运 / 白嫖」
+  替换为「借鉴 / 迁移 / 复用」——Prompt 有禁令，但模型会换个说法回来（实测「最值得抄作业的一处」）；
 - **事实纪律**：所有数字必须来自素材；次要指标没给就直接省略（不写「未披露/无法量化」）；评价要落在具体设计上；
 - **结构化输出**：`ArticleSpec`，块类型 `h2/h3/p/bullets/numbered/quote/highlight/meta_card/figure/table/contest_card/divider`；
 - **容错**：强制 JSON mode + 本地括号配平修复 + 失败把上次输出回传让模型自修，两次失败才报错；
@@ -204,6 +258,7 @@ wechat-lowlevelcv/
 - 小节编号在代码层强制连续：`renumber_sections()` 按出现顺序重排 01,02,03…，单篇素材省略「总结」也不会出现 04 → 06 的断层；
 - 预览页两个复制入口（Clipboard API + execCommand 兜底）：**「复制 Markdown」**（首选——公众号编辑器支持 Markdown 粘贴，另带「查看 Markdown」面板可手动全选复制）与「复制富文本」；后者粘贴进公众号编辑器即保留内联样式，公众号不认 Markdown 时用它兜底；
 - 推草稿时本地图片自动走 `media/uploadimg` 换成微信 CDN URL（同一张图只传一次）；
+- **发布属性固化**（`app/publish/attrs.py`）：每次推草稿必带 `原创声明=文字原创`、`合集=每日推送`。微信 `draft/add` / `freepublish/submit` **没有**这两个字段（开放社区官方回复「不支持」），所以分三层落地：① `WX_ORIGINAL_TYPE` / `WX_COLLECTION` 固化默认值（别名「原创」「图文原创」自动归一，写错值在推送前就报错，不会带着错声明发出去）；② 推送前 `assert_draft_payload` 断言必填字段与属性一致，`WX_DRAFT_EXTRA_FIELDS=1` 时把两个字段直接并进载荷（接口今后开放即生效，无需改代码）；③ `WX_UI_FILL=1` 时用 Playwright 回后台点选（`mp_ui.py`，按「草稿箱 → 标题 → 编辑 → 文字原创 → 每日推送」文本定位，缺合集/未登录/没装依赖都只降级成待办清单，绝不把成功的推送标成失败）。每次推送的属性快照落在 `out/assets/draft_attrs_<issue>.json`；
 - **图片格式归一**（`app/imaging.py`）：微信只收 jpg/png、正文图 ≤1MB，量子位/HackCV 大量使用 webp，直接推会回 `40005 invalid file type hint`。下载落盘时先把 webp/gif/avif 转 PNG（带透明）或 JPEG（照片，质量 88 起逐级降），上传前再兜一次并压到体积上限，所以历史旧稿也能推。
 
 ## 7. API 一览
@@ -248,3 +303,13 @@ python -m unittest discover -s tests -v
 - 赛事源的时效性天然衰减快：雷达条目里 `signup=closed` 的直接丢，但「报名已结束」常常只写在详情页正文里，所以精读前必须逐条抓官方页核验（`fetch_contest_detail`），这一步单条约 3–8 秒；候选全部截止时会退化成复盘稿，而非硬凑一场。
 - FlyAI 主站上瑞数（验证码 + 动态 JS），无头浏览器同样被拦，只走静态镜像；镜像更新有延迟，新赛事可能晚几天出现。
 - Codabench 对无 `User-Agent` 的直连返回蜜罐页（《1984》随机段落、状态码 200），必须靠 `looks_like_honeypot` 识别后转无头渲染，否则会把小说段落当赛题喂给模型。
+- 封面图（`app/render/cover_select.py`）只从「本条素材自己的页面」取图，三模块策略不同：论文走 arXiv HTML → PDF 抠图（teaser/架构/对比图）→ 列表页缩略图；业界走仓库 README（raw 被掐时自动换 gcore.jsdelivr 镜像）→ 项目官网 og:image；赛事只认官方视觉 / 数据集样例 / baseline 框架图，**分数不到阈值就退品牌底图，绝不硬凑**。所有候选过体检（尺寸 / 比例 / 空白图 / badge 头像），logo 走 contain 版式不裁切。**封面只出本期主角素材**（一期选 4 条时，绝不借第 3 条的配图当封面——文章写 A、封面是 B 是硬伤）；主角没有合格图就退品牌底图。阈值与画布尺寸在 `topics.yaml` 的 `cover:` 段可调。
+- `raw.githubusercontent.com` 在部分网络下 TLS 握手直接失败（本机实测如此），README 相对路径图已挂 gcore / cdn 两级 jsDelivr 镜像兜底；CVF 的报告 PDF 与摘要页分目录（`/html/` ↔ `/papers/`），`pdf_url` 已按此重写。
+- 成稿校验的 title 降级提取（`app/llm/client.py → recover_title`）：模型偶尔输出 5000+ 字符完整正文却漏写/改名 `title` 键（实测写过「标题」别名、把规格包进子对象），此前一票否决两次重写全灭。现在按可靠度降级四层：JSON 别名键 → 子对象解包 → JSON 外残留文本的 markdown 一级标题 / 加粗标题行 → 素材元数据标题；Prompt（SYSTEM 与 SPEC_GUIDE）同步加了「第一个键必须是 title」的强约束，重试消息也点名该字段。
+- 论文封面优先级（2026-11-01 定稿）：**核心架构图（首选）> 亮眼定性效果图（次选）> teaser / SOTA 对比图（第三）**；来源侧穷尽 arXiv HTML → PDF 抠图（无架构图就去 PDF 再挖一趟）→ 列表页缩略图，全部体检合格的候选被阈值拦下时按最高分「救场」上封面，只有确实一张合适的图都找不到才退品牌底图。「本期主角」按**成稿标题**定位（模型会自选头条，未必是 selected[0]），主角对齐后 `order==0` 才真正等于「文章写谁、封面就是谁」。
+- 业界封面强保障（2026-11-01 定稿，针对「封面空洞/无图」）：**核心产品图/芯片架构/车端实拍（首选）> 报道主视觉（正文首图 body-hero，多为发布会现场）> logo > 截图**。来源侧：enrich 阶段随正文抽取配图存 `cover_candidates`（量子位 og:image 实测是全站 logo、列表缩略图只有 ~200px，不抓正文图几乎必然退底图）；候选不足时选图阶段对原文链接现场回抓一次正文图（覆盖 HackCV/外部源）。**救场规则泛化**：industry 任何体检过关的实景图都允许低分救场（role=other 需横幅比例 ≥560px 宽），`pick_cover` 对业界稿实际不会返回 None——真正一张图都找不到才走科技感底图。角色词表新增 `product`（芯片/板卡/实车/样机…）与 `venue`（发布会/展台/现场…），业界稿封面主角同样按成稿标题对齐。
+- 赛事封面四级渐进检索（2026-11-01 定稿，铁律「官方优先、相关匹配、尽力而为、不强求」）：**① 官方直采**——`contest_visual.py` 在赛事详情页抓取的同一次请求/渲染里抽官方视觉（og:image / JSON-LD image / banner·hero·keyvisual 容器 / 官方 Logo），SPA 站点（Codabench / 天池）静态页只有壳时由无头渲染兜底；**② 相关匹配**——数据集样例（图注判 dataset）、baseline 框架图（arch）、赛事现场（venue）、知乎/CSDN 冠军复盘里的方案图（related，仅前两级都无着落时才去抓）；**③ 尽力而为**——全无图时 `pick_cover` 返回 None，走品牌底图，**不报错、不卡死**；**④ 不强求**——判不出角色的正文图只有官方页第一张升格 related（且必须横幅比例 ≥560px），其余一律淘汰。角色权重：official 5.0 > logo 4.4 > dataset 4.2 > arch 4.0 > venue 3.8 > related 2.8；救场只限主题正当角色。**身份校验**挡赞助商 logo（logo 文件名必须对上域名/标题的实义词，NTIRE 页的 OPPO/快手 logo 实测全数拦下）、人物照（/speakers/ 等路径）与 GitHub 文字卡（opengraph.githubassets.com）一律不进候选。赛事词表（挑战赛/大赛/冠军/低光/基线…）已并入 `cn_words.py`，标题断行零拆词。验证脚本 `scripts/verify_contest_cover.py` 覆盖「有官方图 / 有相关图 / 无图降级」三场景。
+- 「总结」纯粹性：总结只收束正文实际展开过的论文，严禁突然冒出正文未铺垫的其他方法并横向拉踩（横向对比只属于「04 | 与 SOTA 的对比与分析」，且对手必须是该论文实验表里的方法）。Prompt 有铁律，代码层再兜一道（`prune_summary_offtopic`）：从其他候选论文标题抽专有名词式方法名（TinySR / PeCA 这类，Toward / Diffusion 这类普通词不算），出现在总结节/takeaway 且正文未铺垫的，直接剪句剪条目、剪空整节连标题拿掉；takeaway 因乱入被清空时触发一次定向重写补回。
+- 封面标题语义断行（`app/render/cover.py` + `app/render/cn_words.py`）：曾两次翻车——先有贪心逐字折行把「真实红外超分」切成「…真实红 / 外超分」，后有单字粒度把「引导」切成「…用梯度引 / 导补齐…」。根治方案：**中文进词表分词**（`cn_words.segment_cjk`，零依赖最长匹配，覆盖底层视觉术语 + 通用书面词约 400 条，未登录字退单字原子），「引导」「超分」「感知缺口」等词从此是单个不可劈开的原子；DP 在词边界间做均衡断行，行首禁字/助词（的/了/着过 +400）、行首运算符（+16 → 200）、量词与数字焊死（硬禁 `_HARD_BREAK`）、介词行尾吊空（+220）、后置量纲词（「2K | 以上」+180）各有罚则。**动态字号兜底 `_fit_title`**：先争取两行（48→36px），两行在 32px 都放不下再放开三行重试（48→24px），极端长标题用最小字号 + 省略号——任何一步都不回头劈词。全模块（论文/业界/赛事横版封面与方图缩略图）共用同一条链路。实测「CVPR 2025 | DifIISR：用梯度引导补齐红外超分的视觉与感知缺口」→「…DifIISR：用梯度引导 / 补齐红外超分的视觉与感知缺口」（两行 40px，零拆词）。
+- 学术化文风：SYSTEM 与 PAPER_PROMPT 加【学术文风禁用清单】（禁对读者摊牌式开头、口语动词「一起给/赢了/让出去」、设问句小节标题）；对比对象统一称「最先进的方法（SOTA）」。`spec_tools.normalize_wording(spec, module)` 新增 `_ACADEMIC_WORDING_FIXES`（仅 paper 模块）：「代价写在效率上」→「方法的局限性主要体现在计算效率与参数量上」、「最强对手」→「最先进的方法」、「X 是让出去的」→「X 属于主动的定量取舍（Trade-off）」等，成稿出口强制替换。
+- 叙述纪律（推送即已筛选）：正文严禁把「读不读」的选择题丢回读者（「值不值得读，取决于你是否…」），统一改写成客观的应用价值陈述（「它的应用价值，依赖于人们是否接受以 PSNR 换取感知质量的定量权衡（Trade-off）」）；也严禁任何素材处理过程的旁白（「表格行列对齐存在错位」「按单元格原值呈现」「不做重排」「抓取受限」）——工序细节与读者无关，表格直接以整洁格式输出。SYSTEM 加【定位】与表达纪律第 4 条；代码层 `spec_tools.scrub_reader_burden`（有取舍信息的句子改写、纯反问句删除）与 `scrub_process_narration`（整句删除）在 pipeline 成稿出口再兜一道，删空的段落/bullet 整块拿下。

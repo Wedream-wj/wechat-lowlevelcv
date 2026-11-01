@@ -3,13 +3,16 @@ import time
 import unittest
 from types import SimpleNamespace
 
-from app.llm.client import extract_json, validate_spec
+from app.llm.client import extract_json, recover_title, validate_spec
 from app.llm.mock import DEMO_SPECS
 from app.llm.prompts import (
     NO_NUMERIC_RETRY,
+    _method_tokens,
     drop_unsupported_tables,
+    find_summary_offtopic,
     has_numeric_material,
     material_number_pool,
+    prune_summary_offtopic,
     quant_retry_instruction,
     thin_evidence,
     unsupported_prose_numbers,
@@ -61,6 +64,161 @@ class TestSpecValidation(unittest.TestCase):
     def test_validate_rejects_empty(self):
         with self.assertRaises(Exception):
             validate_spec({"title": "", "sections": []})
+
+
+class TestTitleRecovery(unittest.TestCase):
+    """title 缺失时的降级提取：正文 5000+ 字符不该因为一个键名整篇作废。"""
+
+    SECTIONS = [{"type": "p", "text": "正文"}]
+
+    def test_valid_title_untouched(self):
+        spec = {"title": "原标题", "sections": self.SECTIONS}
+        self.assertFalse(recover_title(spec, "", None))
+        self.assertEqual(spec["title"], "原标题")
+
+    def test_alias_key(self):
+        # 实测症状：模型把标题写成中文键名「标题」
+        spec = {"标题": "别名键标题", "sections": self.SECTIONS}
+        self.assertTrue(recover_title(spec, "", None))
+        self.assertEqual(spec["title"], "别名键标题")
+
+    def test_alias_key_headline(self):
+        spec = {"headline": "Headline Title", "sections": self.SECTIONS}
+        self.assertTrue(recover_title(spec, "", None))
+        self.assertEqual(spec["title"], "Headline Title")
+
+    def test_nested_object_unwrap(self):
+        # 模型把整份规格包进了一个子对象
+        raw = '{"article": {"title": "嵌套标题", "sections": [{"type": "p", "text": "x"}]}}'
+        spec = extract_json(raw)
+        self.assertTrue(recover_title(spec, raw, None))
+        self.assertEqual(spec["title"], "嵌套标题")
+        self.assertEqual(spec["sections"][0]["text"], "x")
+
+    def test_nested_object_recovers_inner_title_from_markdown(self):
+        # 子对象既没有 title 键，JSON 外又有 markdown 大标题
+        raw = '# 总标题\n{"article": {"sections": [{"type": "p", "text": "x"}]}}'
+        spec = extract_json(raw)
+        self.assertTrue(recover_title(spec, raw, None))
+        self.assertEqual(spec["title"], "总标题")
+        self.assertEqual(spec["sections"][0]["text"], "x")
+
+    def test_markdown_heading_outside_json(self):
+        raw = '# 如何打破迭代瓶颈？\n{"sections": [{"type": "p", "text": "x"}]}'
+        spec = extract_json(raw)
+        self.assertTrue(recover_title(spec, raw, None))
+        self.assertEqual(spec["title"], "如何打破迭代瓶颈？")
+
+    def test_bold_heading_outside_json(self):
+        raw = '**加粗标题行**\n{"sections": [{"type": "p", "text": "x"}]}'
+        spec = extract_json(raw)
+        self.assertTrue(recover_title(spec, raw, None))
+        self.assertEqual(spec["title"], "加粗标题行")
+
+    def test_items_metadata_fallback(self):
+        spec = {"sections": self.SECTIONS}
+        items = [SimpleNamespace(title="素材论文标题")]
+        self.assertTrue(recover_title(spec, "", items))
+        self.assertEqual(spec["title"], "素材论文标题")
+
+    def test_recovered_title_passes_validate(self):
+        # 降级提取后应能通过 validate_spec，不再抛「缺少 title」
+        spec = {"标题": "别名标题", "sections": [{"type": "p", "text": "x"}]}
+        recover_title(spec, "", None)
+        self.assertEqual(validate_spec(spec)["title"], "别名标题")
+
+
+class TestSummaryPurity(unittest.TestCase):
+    """「总结」纯粹性：正文只精读 A，总结不得突然冒出 B/C 并横向拉踩。"""
+
+    def _items(self):
+        featured = SimpleNamespace(
+            title="Toward Real-world Infrared Image Super-Resolution: "
+                  "A Unified Autoregressive Framework and Benchmark Dataset",
+            summary="Real-IISR 用 VAR 自回归主干统一真实红外超分，热图与边缘图经 DINOv3 编码。",
+            extra={})
+        others = [
+            SimpleNamespace(
+                title="TinySR: Shallow Diffusion Transformers for Real-World "
+                      "Image Super-Resolution",
+                summary="", extra={}),
+            SimpleNamespace(
+                title="PeCA: 基于调色板上下文辅助推理的动画视频测试期油漆桶着色",
+                summary="", extra={}),
+        ]
+        return [featured, *others]
+
+    def _spec(self):
+        return {
+            "title": "CVPR 2026 | Real-IISR：自回归框架统一真实红外超分",
+            "takeaway": "Real-IISR 把红外先验抬到语义层，LPIPS 0.1997 优于扩散派。",
+            "sections": [
+                {"type": "h2", "text": "01 | 论文速览"},
+                {"type": "p", "text": "Real-IISR 的方法拆解，通篇只讲这一篇。"},
+                {"type": "h2", "text": "05 | 总结"},
+                {"type": "bullets", "items": [
+                    "TinySR：把扩散主干做浅以降低推理成本。",
+                    "Real-IISR：VAR 自回归 + 语义结构先验。",
+                    "PeCA：调色板上下文的测试期推理。",
+                ]},
+                {"type": "p", "text": "三篇里 Real-IISR 价值最高。TinySR 走压缩路线。"},
+                {"type": "h2", "text": "06 | 写在最后"},
+                {"type": "p", "text": "全文的思想落点。"},
+            ],
+        }
+
+    def test_method_tokens_narrow(self):
+        # 窄判定：专有名词式方法名才进池，普通词（Toward/Diffusion）不算
+        toks = _method_tokens("Toward Real-world Image Super-Resolution TinySR Real-IISR NTIRE")
+        self.assertEqual(toks, {"TinySR", "Real-IISR", "NTIRE"})
+
+    def test_offtopic_detected(self):
+        hits = find_summary_offtopic(self._spec(), self._items())
+        self.assertEqual(sorted(hits), ["PeCA", "TinySR"])
+
+    def test_prune_drops_offtopic_bullets_and_sentences(self):
+        spec = self._spec()
+        pruned = prune_summary_offtopic(spec, self._items())
+        self.assertEqual(sorted(pruned), ["PeCA", "TinySR"])
+        summary = next(b for b in spec["sections"]
+                       if b.get("type") == "h2" and "总结" in b.get("text", ""))
+        idx = spec["sections"].index(summary)
+        nxt = next(i for i, b in enumerate(spec["sections"][idx + 1:], idx + 1)
+                   if b.get("type") == "h2")
+        body = spec["sections"][idx + 1:nxt]
+        bullets = next(b for b in body if b.get("type") == "bullets")
+        self.assertEqual(bullets["items"], ["Real-IISR：VAR 自回归 + 语义结构先验。"])
+        para = next(b for b in body if b.get("type") == "p")
+        self.assertEqual(para["text"], "三篇里 Real-IISR 价值最高。")
+        # 正文与 takeaway 未被误伤
+        self.assertIn("通篇只讲这一篇", spec["sections"][1]["text"])
+        self.assertIn("Real-IISR", spec["takeaway"])
+
+    def test_multipaper_body_counts_as_coverage(self):
+        # 多篇并列精读：TinySR 与 PeCA 都在 01–03 节被正式拆解过，
+        # 总结逐篇归纳是正当的，一个都不剪
+        spec = self._spec()
+        spec["sections"].insert(2, {"type": "h2", "text": "02 | TinySR 的浅扩散主干"})
+        spec["sections"].insert(3, {"type": "p", "text": "TinySR 把扩散主干做浅，成本大降。"})
+        spec["sections"].insert(4, {"type": "h2", "text": "03 | PeCA 的测试期适配"})
+        spec["sections"].insert(5, {"type": "p", "text": "PeCA 用调色板上下文做时空推理。"})
+        self.assertEqual(find_summary_offtopic(spec, self._items()), [])
+
+    def test_takeaway_offtopic_cleared(self):
+        spec = self._spec()
+        spec["takeaway"] = "TinySR 与 PeCA 各有侧重，Real-IISR 最亮。"
+        self.assertTrue(prune_summary_offtopic(spec, self._items()))
+        self.assertEqual(spec["takeaway"], "")
+
+    def test_clean_summary_untouched(self):
+        spec = self._spec()
+        for b in spec["sections"]:
+            if b.get("type") == "bullets":
+                b["items"] = [b["items"][1]]
+        spec["sections"] = [b for b in spec["sections"]
+                            if not (b.get("type") == "p" and "三篇里" in str(b.get("text")))]
+        self.assertEqual(find_summary_offtopic(spec, self._items()), [])
+        self.assertFalse(prune_summary_offtopic(spec, self._items()))
 
 
 class TestWeChatRender(unittest.TestCase):
@@ -327,6 +485,44 @@ class TestSafeDownload(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAcademicWording(unittest.TestCase):
+    """学术化文风兜底：口语比喻/口语动词只在 paper 模块替换，其他模块不动。"""
+
+    def test_paper_module_replacements(self):
+        from app.spec_tools import normalize_wording
+
+        spec = {"sections": [
+            {"type": "p", "text": "代价写在效率上，什么场景下会被反超？"},
+            {"type": "bullets", "items": ["PSNR 是让出去的，最强对手要分指标看。",
+                                          "框架 + 基准一起给，这个设计很讨巧。"]},
+        ]}
+        hits = normalize_wording(spec, "paper")
+        self.assertGreaterEqual(hits, 6)
+        self.assertEqual(spec["sections"][0]["text"],
+                         "方法的局限性主要体现在计算效率与参数量上，方法的适用场景与潜在局限？")
+        self.assertIn("属于主动的定量取舍", spec["sections"][1]["items"][0])
+        self.assertIn("最先进的方法", spec["sections"][1]["items"][0])
+        self.assertIn("一同提出", spec["sections"][1]["items"][1])
+        self.assertIn("设计得颇为经济", spec["sections"][1]["items"][1])
+        self.assertNotIn("最强对手", str(spec))
+        self.assertNotIn("一起给", str(spec))
+
+    def test_other_module_untouched(self):
+        from app.spec_tools import normalize_wording
+
+        spec = {"sections": [{"type": "p", "text": "最强对手在榜单上被反超。"}]}
+        normalize_wording(spec, "contest")
+        self.assertIn("最强对手", spec["sections"][0]["text"])
+
+    def test_generic_fixes_still_global(self):
+        from app.spec_tools import normalize_wording
+
+        spec = {"sections": [{"type": "p", "text": "这套代码是抄作业来的。"}]}
+        normalize_wording(spec, "contest")
+        self.assertIn("借鉴", spec["sections"][0]["text"])
+        self.assertNotIn("抄作业", spec["sections"][0]["text"])
 
 
 class TestSummaryMutex(unittest.TestCase):

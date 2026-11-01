@@ -163,6 +163,67 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
     date_str = date.today().strftime("%Y.%m.%d")
 
     if module == "contest" and variant == "baseline":
+        # NTIRE 官方报告走另一套结构（赛道定义 / 榜单 / 冠军方案 / 社区复盘）
+        ntire_item = next((i for i in items if i.extra.get("ntire_report")), None)
+        if ntire_item is not None:
+            rep = ntire_item.extra.get("ntire_report") or {}
+            champ = rep.get("champion") or {}
+            board = rep.get("leaderboard") or []
+            secs = rep.get("sections") or []
+            comm = rep.get("community") or []
+            track = ntire_item.extra.get("track") or ntire_item.title
+            year = ntire_item.extra.get("year") or ""
+            rows = [["赛事", f"NTIRE {year} {track}".strip()],
+                    ["赛会", ntire_item.extra.get("conference") or "NTIRE Workshop"],
+                    ["报告", ntire_item.url]]
+            if champ.get("team"):
+                rows.append(["冠军", f"{champ.get('team')}"
+                              + (f"（{champ.get('score')}）" if champ.get("score") else "")])
+            n_sections: list[dict] = [
+                {"type": "meta_card", "rows": rows},
+                {"type": "h2", "text": "01 | 赛道与任务定义"},
+                {"type": "p", "text": _desc(rep.get("abstract"), 320)
+                 or "该赛道围绕真实场景的退化复原展开，评测口径以官方报告为准。"},
+                {"type": "h2", "text": "02 | 数据构建与评测协议"},
+                {"type": "p", "text": _desc((rep.get("benchmark") or [""])[0], 300)
+                 or "评测协议以官方榜单说明为准。"},
+                {"type": "h2", "text": "03 | 冠军方案拆解"},
+                {"type": "p", "text": (f"冠军队伍 {champ.get('team')} 的方案"
+                                       + (f"：{champ.get('method')}" if champ.get("method") else "")
+                                       + "。该方案的关键在于把数据口径与评测口径对齐，再谈结构改进。")},
+            ]
+            if secs:
+                n_sections.append({"type": "bullets", "items": [
+                    f"{s.get('num')} {s.get('method')}（{s.get('team') or '队伍未标注'}）"
+                    for s in secs[:4]]})
+            n_sections.append({"type": "h2", "text": "04 | 榜单与差距"})
+            if board:
+                n_sections.append({"type": "table",
+                                   "header": ["名次", "队伍", "分数"],
+                                   "rows": [[str(b.get("rank")), b.get("team"), b.get("score")]
+                                            for b in board[:5]]})
+            n_sections.append({"type": "h2", "text": "05 | 社区复盘：冠军选手怎么调"})
+            if comm:
+                n_sections.append({"type": "bullets", "items": [
+                    f"{c.get('source')}：{_desc(c.get('title'), 60)}" for c in comm[:3]]})
+            else:
+                n_sections.append({"type": "p",
+                                   "text": "复现时优先对齐提交格式与推理预算，再谈结构替换。"})
+            n_sections.append({"type": "h2", "text": "06 | 写在最后"})
+            n_sections.append({"type": "p",
+                               "text": "这条赛道的评分口径反映的是真实业务里对稳定性与效率的取舍，"
+                                       "可迁移的部分是数据管线与评测对齐方法，而不是某一个模块。"})
+            return {
+                "title": f"NTIRE {year} {_desc(track, 18)}：冠军方案精读",
+                "subtitle": f"{date_str} · 官方报告 + 社区复盘",
+                "digest": "自动占位稿：验证「NTIRE 官方报告精读」链路与排版。",
+                "lead": ["本篇为 NTIRE 报告精读的离线占位稿，用于验证抓取与排版链路。",
+                         "配置大模型后将输出完整的赛道定义、榜单拆解与冠军方案解读。"],
+                "sections": n_sections,
+                "takeaway": "先读官方报告的评测口径，再看榜单差距，最后按社区复盘补齐工程细节。",
+                "sources": [{"name": ntire_item.title, "url": ntire_item.url}],
+            }
+
         # 变体：整篇「竞赛 baseline 精读」的离线占位稿（只讲原赛题与 baseline 解法）
         base_item = next((i for i in items if i.extra.get("is_learning_resource")), None)
         if base_item is None:

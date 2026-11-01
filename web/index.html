@@ -49,6 +49,21 @@
     padding:9px 13px;font-size:12.5px;cursor:pointer;transition:.16s;font-family:inherit;}
   button:hover{border-color:#C9D2F5;transform:translateY(-1px);}
   button.primary{background:var(--primary);border-color:var(--primary);color:#fff;font-weight:600;}
+  /* baseline 精读：绿色行动号召（CTA）。与蓝色「生成一期」区分开——
+     蓝色是常规出稿，绿色是「深挖一份方案」的进阶动作，颜色本身就是提示 */
+  button.cta-green{
+    background:linear-gradient(135deg,#10B981,#059669);
+    border-color:#059669;color:#fff;font-weight:600;letter-spacing:.2px;
+    box-shadow:0 2px 8px rgba(5,150,105,.28);
+  }
+  button.cta-green:hover{
+    background:linear-gradient(135deg,#34D399,#059669);
+    border-color:#047857;color:#fff;
+    box-shadow:0 6px 16px rgba(5,150,105,.34);
+    transform:translateY(-1px);
+  }
+  button.cta-green:active{transform:translateY(0);box-shadow:0 1px 4px rgba(5,150,105,.3);}
+  button.cta-green:disabled{box-shadow:none;}
   button.danger{color:#C0392B;border-color:#F0C7C2;}
   button.danger:hover{background:#FDF1EF;border-color:#C0392B;}
   button.ghost{background:transparent;}
@@ -173,14 +188,16 @@
     <div class="card" data-module="contest">
       <div class="card-head"><span class="tag contest">MODULE C</span><span class="chip" id="sched-contest">—</span></div>
       <h2>赛事竞赛</h2>
-      <p class="desc">Kaggle / 天池 / CVPR·ECCV Workshop 挑战赛，整理赛题方向、奖金、截止时间与参赛入口。</p>
+      <p class="desc">Kaggle / 天池 / 各大赛事雷达，整理赛题、奖金与截止时间；baseline 精读可深挖 Datawhale 复现或 NTIRE 官方挑战赛报告。</p>
       <div class="meta-row">
-        <span class="chip">Kaggle API</span><span class="chip">天池</span><span class="chip">搜索补全</span>
+        <span class="chip">Kaggle API</span><span class="chip">天池</span><span class="chip">AI 赛事雷达</span>
+        <span class="chip">CVF NTIRE 报告</span><span class="chip">知乎 / CSDN 复盘</span>
       </div>
       <div class="actions">
         <button class="primary" onclick="run('contest', this)">生成一期</button>
-        <button onclick="run('contest', this, {variant:'baseline'})">生成 baseline 精读</button>
+        <button class="cta-green" onclick="run('contest', this, {variant:'baseline'})">生成 baseline 精读</button>
         <button onclick="openPrompt('contest')">看 Prompt</button>
+        <button class="ghost" onclick="openPrompt('contest','contest_ntire')">NTIRE Prompt</button>
       </div>
       <div class="runbox" id="runbox-contest" hidden>
         <div class="runbar"><div class="runbar-fill" id="bar-contest"></div></div>
@@ -467,8 +484,15 @@ async function pushIssue(id, btn){
     const r = await fetch(`/api/issues/${id}/push`, {method:"POST"});
     const d = await r.json();
     if(!r.ok){ throw new Error(d.detail || d.error || "推送失败"); }
-    toast("已进入公众号草稿箱");
+    const a = d.attrs || {};
+    if(a.describe){
+      log(`发布属性：${a.describe}${a.ui_ok ? "（已自动勾选）" : "（待后台补勾）"}`);
+      toast(a.ui_ok ? "已入草稿箱，原创与合集已勾选" : "已入草稿箱，原创/合集待补勾");
+    }else{
+      toast("已进入公众号草稿箱");
+    }
     log(`草稿创建成功：media_id=${d.media_id}`);
+    (a.todo || []).forEach(t => log(`待办：${t}`));
     loadIssues();
   }catch(e){
     log("推送失败：" + e.message);
@@ -495,13 +519,15 @@ async function deleteIssue(id, btn){
   }finally{ btn.disabled = false; }
 }
 
-async function openPrompt(module){
+async function openPrompt(module, key){
+  // key 用于看模块内变体的 Prompt（如 contest_ntire），不传就看模块主 Prompt
   const dlg = document.getElementById("prompt-dialog");
-  document.getElementById("prompt-title").textContent = `Prompt · ${MODULE_LABEL[module]}`;
+  const id = key || module;
+  document.getElementById("prompt-title").textContent = `Prompt · ${MODULE_LABEL[module] || id}`;
   document.getElementById("prompt-body").textContent = "加载中…";
   dlg.showModal();
   try{
-    const r = await fetch(`/api/prompts/${module}`); const d = await r.json();
+    const r = await fetch(`/api/prompts/${id}`); const d = await r.json();
     document.getElementById("prompt-body").textContent = d.prompt;
   }catch(e){ document.getElementById("prompt-body").textContent = "加载失败：" + e; }
 }

@@ -170,6 +170,196 @@ def strip_countdown_title(spec: dict, registration_closed: bool) -> bool:
     return True
 
 
+# ------------------------------------------------------------------ 措辞替换
+# 「抄走 / 抄作业 / 照抄」这类词在公众号里既粗糙又容易引战，规范用词是「复用 / 借鉴 / 迁移」。
+# Prompt 里已明令禁止，但模型会换个说法回来（「最值得抄作业的一处」），代码层兜底替换。
+# 学术化文风（仅 paper 模块）：口语动词/比喻 → 顶会审稿人口径的标准表述。
+# 赛事/业界稿里「最强对手」这类词是正常说法（榜单对比的不是论文方法），不参与替换。
+_ACADEMIC_WORDING_FIXES: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"代价写在效率上"), "方法的局限性主要体现在计算效率与参数量上"),
+    (re.compile(r"([^。\n；]{0,24})是让出去的"), r"\1属于主动的定量取舍（Trade-off）"),
+    (re.compile(r"什么场景(下)?会被反超"), "方法的适用场景与潜在局限"),
+    (re.compile(r"什么场景(下)?会失手"), "哪类输入上会失效"),
+    (re.compile(r"最强对手"), "最先进的方法"),
+    (re.compile(r"一起给"), "一同提出"),
+    (re.compile(r"讨巧"), "设计得颇为经济"),
+)
+
+_WORDING_FIXES: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"抄作业|抄走|照抄|抄袭|抄(?!送)"), "借鉴"),
+    (re.compile(r"套用"), "迁移"),
+    (re.compile(r"搬运|白嫖"), "复用"),
+)
+
+# ---------------------------------------------------------------- 叙述纪律
+# 本号定位是「只挑值得读的那几篇」：推送即已筛选，正文不能把「读不读」的选择题
+# 推回给读者。Prompt 里已明令禁止，这里再兜一道——命中即改写或整句删除。
+_READER_BURDEN_RE = re.compile(
+    r"值不值得读|值不值得看|要不要读|读不读|"
+    r"读者(?:自行)?(?:判断|取舍|决定)|自行判断(?:是否)?(?:值得|要读)"
+)
+_READER_RECAST_RE = re.compile(
+    r"(?:它)?(?:到底)?值不值得(?:读|看)\s*[？?]?\s*[，,：:]?\s*取决于\s*"
+    r"(?:你|读者|读者们|大家)?\s*"
+)
+# 素材处理过程的旁白：表格错位、原值呈现、抓取受限……属于内部工序，读者不该看到
+_PROCESS_NARRATION_RE = re.compile(
+    r"行列对齐|原值呈现|不做重排|重新对齐|素材表格|"
+    r"表格[^。！？]{0,12}(?:错位|失真|杂乱|不齐|参差)|"
+    r"(?:抓取|解析|抽取)[^。！？]{0,6}(?:限制|受限|失败|异常|错位|偏差)|"
+    r"素材(?:有限|不足|缺失|不全)"
+)
+
+
+def _edit_sentences(spec: dict, edit) -> int:
+    """按句改写正文（p/quote/highlight 与 bullets/numbered），edit 返回新句或 ""(删除)。
+
+    返回被改动的句数；删空的段落/bullet 整块拿下，避免留下空行。
+    """
+    hits = 0
+    sections = spec.get("sections") or []
+    kept: list = []
+    for block in sections:
+        if not isinstance(block, dict):
+            kept.append(block)
+            continue
+        btype = block.get("type")
+        if btype in ("p", "quote", "highlight"):
+            text = str(block.get("text") or "")
+            if not text.strip():
+                kept.append(block)
+                continue
+            sents = [s for s in _SENT_SPLIT_RE.findall(text) if s.strip()]
+            new = [edit(s) for s in sents]
+            hits += sum(1 for a, b in zip(sents, new) if a != b)
+            body = "".join(x for x in new if x).strip()
+            if not body:
+                continue
+            block["text"] = body
+            kept.append(block)
+        elif btype in ("bullets", "numbered"):
+            items = block.get("items") or []
+            new_items = []
+            for it in items:
+                if not isinstance(it, str):
+                    new_items.append(it)
+                    continue
+                sents = [s for s in _SENT_SPLIT_RE.findall(it) if s.strip()]
+                if not sents:
+                    continue
+                new = [edit(s) for s in sents]
+                hits += sum(1 for a, b in zip(sents, new) if a != b)
+                joined = "".join(x for x in new if x).strip()
+                if joined:
+                    new_items.append(joined)
+            if not new_items:
+                continue
+            block["items"] = new_items
+            kept.append(block)
+        else:
+            kept.append(block)
+    if hits:
+        spec["sections"] = kept
+    return hits
+
+
+def scrub_reader_burden(spec: dict) -> int:
+    """清掉「值不值得读 / 读者自行判断」这类把筛选责任推给读者的话。
+
+    有「取决于 X」的取舍信息 → 改写成客观陈述（「它的应用价值，依赖于人们是否…」）；
+    只有一句反问、没有信息量的 → 整句删掉。lead 与 takeaway 一并处理。
+    """
+    def edit(sent: str) -> str:
+        if not _READER_BURDEN_RE.search(sent):
+            return sent
+        m = _READER_RECAST_RE.search(sent)
+        if m:
+            return sent[:m.start()] + "它的应用价值，依赖于人们" + sent[m.end():]
+        return ""
+
+    hits = _edit_sentences(spec, edit)
+    lead = spec.get("lead")
+    if isinstance(lead, list):
+        new_lead = []
+        for para in lead:
+            if not isinstance(para, str):
+                new_lead.append(para)
+                continue
+            sents = [s for s in _SENT_SPLIT_RE.findall(para) if s.strip()]
+            new = [edit(s) for s in sents]
+            hits += sum(1 for a, b in zip(sents, new) if a != b)
+            joined = "".join(x for x in new if x).strip()
+            if joined:
+                new_lead.append(joined)
+        spec["lead"] = new_lead
+    take = spec.get("takeaway")
+    if isinstance(take, str) and take.strip():
+        sents = [s for s in _SENT_SPLIT_RE.findall(take) if s.strip()]
+        new = [edit(s) for s in sents]
+        hits += sum(1 for a, b in zip(sents, new) if a != b)
+        spec["takeaway"] = "".join(x for x in new if x).strip()
+    return hits
+
+
+def scrub_process_narration(spec: dict) -> int:
+    """删掉「素材表格行列错位 / 按原值呈现 / 抓取受限」这类素材处理过程的旁白。
+
+    数据本身照旧输出（表格块不动），只是不再向读者交代工序。
+    """
+    def edit(sent: str) -> str:
+        return "" if _PROCESS_NARRATION_RE.search(sent) else sent
+
+    hits = _edit_sentences(spec, edit)
+    lead = spec.get("lead")
+    if isinstance(lead, list):
+        new_lead = []
+        for para in lead:
+            if not isinstance(para, str):
+                new_lead.append(para)
+                continue
+            sents = [s for s in _SENT_SPLIT_RE.findall(para) if s.strip()]
+            new = [edit(s) for s in sents]
+            hits += sum(1 for a, b in zip(sents, new) if a != b)
+            joined = "".join(x for x in new if x).strip()
+            if joined:
+                new_lead.append(joined)
+        spec["lead"] = new_lead
+    return hits
+
+
+def normalize_wording(spec: dict, module: str | None = None) -> int:
+    """把禁用措辞替换成规范说法，返回命中次数。只改用词，不动事实与结构。
+
+    module="paper" 时追加学术化文风替换（口语比喻 → 标准学术表述）；
+    其余模块只过通用禁用词。
+    """
+    hits = 0
+    fixes = _WORDING_FIXES + (_ACADEMIC_WORDING_FIXES if module == "paper" else ())
+
+    def _fix(text: str) -> str:
+        nonlocal hits
+        out = text
+        for pat, repl in fixes:
+            out, n = pat.subn(repl, out)
+            hits += n
+        return out
+
+    for block in spec.get("sections") or []:
+        if not isinstance(block, dict):
+            continue
+        if isinstance(block.get("text"), str):
+            block["text"] = _fix(block["text"])
+        if isinstance(block.get("items"), list):
+            block["items"] = [_fix(i) if isinstance(i, str) else i for i in block["items"]]
+        if isinstance(block.get("caption"), str):
+            block["caption"] = _fix(block["caption"])
+    if isinstance(spec.get("lead"), list):
+        spec["lead"] = [_fix(p) if isinstance(p, str) else p for p in spec["lead"]]
+    if isinstance(spec.get("takeaway"), str):
+        spec["takeaway"] = _fix(spec["takeaway"])
+    return hits
+
+
 def normalized_spec(spec: dict, module: str | None = None) -> dict:
     """返回「标题已规范、编号已连续、信息卡已收敛、元时间已剔除」的浅拷贝。
 

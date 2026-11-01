@@ -20,11 +20,13 @@ from .filters import scoring
 from .llm.client import LLMClient, LLMError
 from .llm.prompts import (
     INDUSTRY_HOOK_RETRY,
+    SUMMARY_FOCUS_RETRY,
     drop_redundant_summary,
     drop_unsupported_tables,
     enforce_title_rules,
     has_numeric_material,
     industry_lead_is_flat,
+    prune_summary_offtopic,
     quant_retry_instruction,
     thin_evidence,
     title_is_number_led,
@@ -34,20 +36,25 @@ from .llm.prompts import (
 )
 from .models import Article, Item
 from .render import cover as cover_mod
+from .render import cover_select
 from .render import wechat
 from .render.markdown import spec_to_markdown
 from .render.preview import render_preview
 from .sources import MODULE_LABEL, arxiv, collect
 from .sources import chinese_media as _chinese_media
 from .sources import competitions as _competitions
+from .sources import cvf
 from .sources import publication as _publication
 from .sources.base import HttpClient
 from .spec_tools import (
     MAX_TABLE_COLS,
     normalize_meta_cards,
     normalize_section_titles,
+    normalize_wording,
     prune_spec_tables,
     renumber_sections,
+    scrub_process_narration,
+    scrub_reader_burden,
     strip_countdown_title,
 )
 
@@ -324,10 +331,29 @@ async def run_module(module: str, *, publish: bool | None = None,
                     msg = f"产业媒体正文回抓失败：{type(exc).__name__}: {exc}"
                     errors.append({"source": "产业媒体正文", "error": msg})
                     _log(msg)
-            # baseline 精读变体：给学习资源条目补 README 摘录与文件清单（成稿的核心素材）
+            # baseline 精读变体：给学习资源条目补「成稿核心素材」。
+            # 两种素材两条路：
+            #   · Datawhale 复现仓库 → README + 文件清单 + 关键代码（讲代码起点）；
+            #   · NTIRE 官方报告 → 报告正文 + 榜单 + 冠军方案 + 知乎/CSDN 复盘（讲赛道与解法）。
             if module == "contest" and variant == "baseline":
                 res_item = next((i for i in selected if i.extra.get("is_learning_resource")), None)
-                if res_item and res_item.extra.get("folder"):
+                if res_item and res_item.extra.get("origin") == "ntire":
+                    report("配图", 44, "读取 NTIRE 官方报告并检索冠军方案复盘…", True)
+                    detail = await cvf.enrich_report(client, res_item)
+                    res_item.extra["ntire_report"] = detail
+                    # enrich 阶段已从报告 PDF 抠好封面候选（同一次下载，零额外请求）
+                    if detail.get("cover_candidates"):
+                        res_item.extra["cover_candidates"] = detail["cover_candidates"]
+                    champ = detail.get("champion") or {}
+                    board = detail.get("leaderboard") or []
+                    _log(f"NTIRE 报告：正文 {len(detail.get('report_excerpt') or '')} 字 / "
+                         f"榜单 {len(board)} 名 / 方法小节 {len(detail.get('sections') or [])} 个 / "
+                         f"社区复盘 {len(detail.get('community') or [])} 篇")
+                    if champ.get("team"):
+                        _log(f"冠军方案：{champ.get('team')}"
+                             + (f"（{champ.get('score')}）" if champ.get("score") else "")
+                             + (f" · {champ.get('method')[:40]}" if champ.get("method") else ""))
+                elif res_item and res_item.extra.get("folder"):
                     report("配图", 44, "拉取 baseline 仓库的 README 与文件清单…", True)
                     detail = await _competitions.fetch_baseline_detail(
                         client, res_item.extra["folder"])
@@ -435,6 +461,28 @@ async def run_module(module: str, *, publish: bool | None = None,
             # 代码层强制执行（首稿与重写两个出口都要过）
             if drop_redundant_summary(spec):
                 _log("「总结」节与「核心结论」高亮并存，已按互斥规则移除高亮块")
+            # 「总结」纯粹性：正文只精读 A，总结却冒出 B/C 的方法名并横向拉踩，
+            # 是读者一眼就能看穿的逻辑断层。Prompt 有铁律，这里代码层再兜一道：
+            # 先剪掉乱入内容；takeaway 因此被清空时，花一次 LLM 调用定向重写收束部分。
+            if module == "paper" and llm.enabled:
+                offtopic = prune_summary_offtopic(spec, selected)
+                if offtopic:
+                    _log(f"「总结」突兀引入了正文未展开的方法（{'、'.join(offtopic)}），已剪除相关内容")
+                    if not str(spec.get("takeaway") or "").strip():
+                        report("成稿", 84, "总结引入了无关方法且一句话总结被清空，定向重写收束部分…", True)
+                        try:
+                            rewritten = await llm.write(
+                                module, selected, figures, date_str,
+                                on_progress=on_llm,
+                                extra_instruction=SUMMARY_FOCUS_RETRY,
+                            )
+                            if not prune_summary_offtopic(rewritten, selected):
+                                spec = rewritten
+                                _log("收束部分已重写，通过纯粹性校验")
+                            else:
+                                _log("收束重写仍引入无关方法，保留已剪除的首稿")
+                        except LLMError as exc:
+                            _log(f"收束重写失败，保留已剪除的首稿：{exc}")
             # 论文标题信誉度：标题严禁出现 arXiv 字样；venue 必须与发表状态查证
             # 结论一致（模型偶尔写错会议名），模型违规时代码层强制清洗/对齐
             if enforce_title_rules(spec, module, selected):
@@ -477,6 +525,13 @@ async def run_module(module: str, *, publish: bool | None = None,
             _log("章节标题已规范为栏目正式名（冷静一下 → 写在最后）")
         if normalize_meta_cards(spec, module):
             _log("业界信息卡已合并「主体 + 事件」为单行，规模/金额折入事件描述")
+        if normalize_wording(spec, module):
+            _log("禁用措辞已替换（口语比喻 → 学术表述 / 抄作业 → 借鉴 等）")
+        # 叙述纪律兜底：推送即已筛选，不把「读不读」推回读者；素材工序（表格错位、
+        # 抓取受限）也不许出现在正文里——Prompt 有硬约束，这里再删一道。
+        narration = scrub_reader_burden(spec) + scrub_process_narration(spec)
+        if narration:
+            _log(f"已剔除 {narration} 处读者筛选话术 / 素材处理旁白（工序细节不进正文）")
         if renumber_sections(spec):
             _log("章节编号已重排为连续序号："
                  + " / ".join(str(b.get("text", "")) for b in spec.get("sections") or []
@@ -492,8 +547,43 @@ async def run_module(module: str, *, publish: bool | None = None,
         _log(f"成稿完成（{llm_mode}）：{spec.get('title', '')}")
         report("成稿", 85, f"成稿完成（{llm_mode}）：{spec.get('title', '')}", True)
 
+        report("排版", 87, "按模块策略挑选封面图…", True)
+        # 封面选图要联网（PDF / README / 官网 og:image），单独开一个客户端：
+        # 主客户端在上面的素材阶段已经关掉了，且封面失败绝不能拖垮出稿。
+        # 「本期主角」必须按成稿标题定位，而不是 selected[0]：模型会自选头条
+        # （实测一期里它跳过并列 22 分的 TinySR，选了 Real-IISR 深挖），
+        # 主角排到首位后 order==0 才真正等于「文章写谁、封面就是谁」。
+        pick = None
+        cover_items = list(selected)
+        # industry 一期常含多条动态、主线只深挖一条：封面同样必须跟着成稿头条走，
+        # 否则「正文写 Momenta 芯片、封面却是别家发布会」的图文不搭会直接劝退读者
+        if module in ("paper", "industry") and selected:
+            featured = _featured_item_for_title(str(spec.get("title") or ""), selected)
+            if featured is not None and featured is not selected[0]:
+                cover_items = [featured] + [it for it in selected if it is not featured]
+                _log(f"封面主角按成稿头条对齐：{featured.title[:36]}")
+        try:
+            async with HttpClient() as cover_client:
+                pick = await asyncio.wait_for(
+                    cover_select.pick_cover(cover_client, cover_items, module, figures),
+                    timeout=120.0)
+        except asyncio.TimeoutError:
+            _log("封面选图超时（>120s），本期使用品牌底图")
+        except Exception as exc:      # 选图只是锦上添花，任何异常都不该阻断出稿
+            _log(f"封面选图异常，改用品牌底图：{type(exc).__name__}: {exc}")
+        if pick:
+            _log(f"封面：{pick.describe()}")
+        elif module == "contest":
+            # 赛事稿的「非强求」：官方视觉与相关生态图都没检索到，就退品牌底图。
+            # 这不是失败——流水线必须照常出稿，也不许为凑封面抓一张无关图。
+            _log("封面：未检索到官方/相关视觉，按「不强求」使用品牌底图（不影响出稿）")
+        else:
+            _log("封面：素材里没有达到阈值的图，使用品牌底图")
+        cover_path = cover_mod.make_cover(spec, module, date_str,
+                                          hero=pick.path if pick else None,
+                                          hero_fit=pick.fit if pick else "cover")
+        cover_select.write_meta(pick, module)
         report("排版", 88, "渲染微信排版与预览页…", True)
-        cover_path = cover_mod.make_cover(spec, module, date_str)
         body = wechat.render_body(spec, figures, module, date_str)
         markdown = spec_to_markdown(spec, figures, module)
 
@@ -541,6 +631,7 @@ async def run_module(module: str, *, publish: bool | None = None,
             "fetched": len(items),
             "selected": len(selected),
             "figures": len(figures),
+            "cover": pick.describe() if pick else "品牌底图（无合格素材图）",
             "issue_id": issue_id,
             "preview": str(_preview_path(issue_id)),
             "llm_mode": llm_mode,
@@ -558,13 +649,23 @@ async def run_module(module: str, *, publish: bool | None = None,
                          stats={"seconds": round(time.time() - started, 1)})
 
 
-async def push_issue(issue_id: str) -> Article:
-    """把已渲染的一期推到公众号草稿箱。"""
+async def push_issue(issue_id: str, *, attrs: "PublishAttrs | None" = None) -> Article:
+    """把已渲染的一期推到公众号草稿箱。
+
+    发布属性（原创声明「文字原创」、合集「每日推送」）是硬默认：从 settings 取、
+    推送前断言、推完补勾后台并落盘快照。微信开放接口没有这两个字段，所以：
+    - `WX_DRAFT_EXTRA_FIELDS=1` 时把它们直接写进 draft/add 载荷（接口支持后生效）；
+    - `WX_UI_FILL=1` 时用 Playwright 回后台点选；两者都没开就明确列出待办。
+    """
+    from .publish.attrs import DraftRecord, PublishAttrs, PublishAttrError, write_snapshot
+    from .publish import mp_ui
     from .publish.wechat_api import WeChatClient, WeChatError
 
     article = db.get_article(issue_id)
     if not article:
         raise PipelineError(f"找不到期号 {issue_id}")
+
+    attrs = attrs or PublishAttrs.from_settings()
 
     try:
         async with WeChatClient() as wx:
@@ -574,6 +675,11 @@ async def push_issue(issue_id: str) -> Article:
             thumb = settings.wx_thumb_media_id
             if article.cover_path:
                 thumb = await wx.upload_cover_material(article.cover_path)
+            if not thumb:
+                raise PipelineError(
+                    "这期没有封面，也没配 WX_THUMB_MEDIA_ID：微信草稿必须带封面素材，"
+                    "先在控制台重新渲染一期（会自动生成封面）或配置默认封面的 media_id"
+                )
             source_url = ""
             for block in article.items[:1]:
                 source_url = block.url
@@ -584,11 +690,36 @@ async def push_issue(issue_id: str) -> Article:
                 content=content,
                 thumb_media_id=thumb,
                 source_url=source_url,
+                attrs=attrs,
             )
+            include_attrs = wx.last_include_attrs
         db.update_article_status(issue_id, "pushed", media_id=media_id)
         article.status = "pushed"
         article.wx_media_id = media_id
+
+        # 官方接口给不了的：后台 UI 补勾（失败只降级成待办，绝不影响推送结果）
+        try:
+            ui = await mp_ui.fill_draft_attrs(article.title, attrs)
+        except Exception as exc:  # 任何异常都不许回滚一次成功的推送
+            ui = mp_ui.FillResult(reason=f"{type(exc).__name__}: {exc}")
+        print(f"[push:{article.module}] 发布属性 {attrs.describe}；{ui.describe()}", flush=True)
+
+        snapshot = write_snapshot(DraftRecord(issue_id=issue_id, attrs=attrs, media_id=media_id,
+                                              include_attrs=include_attrs, ui_fill=ui.to_dict()))
+        article.wx_attrs = {
+            **attrs.payload(),
+            "describe": attrs.describe,
+            "applied": ui.applied,
+            "missing": ui.missing,
+            "ui_ok": ui.ok,
+            "snapshot": str(snapshot),
+            "todo": [] if ui.ok else attrs.todo(),
+        }
         return article
+    except PublishAttrError as exc:
+        # 发布属性（原创/合集）校验不过：宁可推不出去，也不带着错的声明发出去
+        db.update_article_status(issue_id, "failed", error=str(exc))
+        raise PipelineError(f"发布属性校验失败：{exc}") from exc
     except WeChatError as exc:
         db.update_article_status(issue_id, "failed", error=str(exc))
         raise PipelineError(f"微信接口失败：{exc}") from exc

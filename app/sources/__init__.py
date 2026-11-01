@@ -7,7 +7,7 @@ from typing import Awaitable, Callable
 
 from ..models import Item
 from .base import HttpClient
-from . import (arxiv, awesome_llv, chinese_media, competitions, contest_feeds,
+from . import (arxiv, awesome_llv, chinese_media, competitions, contest_feeds, cvf,
                github_trending, industry, lowlevelcv, paperswithcode)
 
 Collector = Callable[[HttpClient], Awaitable[list[Item]]]
@@ -38,6 +38,9 @@ COLLECTORS: dict[str, list[tuple[str, Collector]]] = {
         # 独立源而非塞在 fetch() 里拼：失败/限流要进 collect() 的源告警，
         # 让运营看见「baseline 源 0 条」，而不是静默吞掉后让筛选层报出误导性错误
         ("Datawhale baseline", competitions.fetch_baseline),
+        # 顶会官方报告：NTIRE 挑战赛报告自带赛道定义、数据规格、榜单与各队方法，
+        # 比零散仓库更适合做「方案精读」；与 Datawhale 那一路共同构成学习资源池
+        ("CVF NTIRE 报告", cvf.fetch_reports),
     ],
 }
 
@@ -58,6 +61,8 @@ SOURCE_TIMEOUTS: dict[str, float] = {
     "Codabench": 100.0,
     "FlyAI": 40.0,
     "Datawhale baseline": 45.0,
+    # 3 届 workshop 菜单 + 每届 NTIRE 页（600KB HTML），给足超时
+    "CVF NTIRE 报告": 90.0,
 }
 
 MODULE_LABEL = {"paper": "学术论文", "industry": "业界进展", "contest": "赛事竞赛"}

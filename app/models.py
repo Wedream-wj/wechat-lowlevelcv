@@ -104,6 +104,8 @@ class Article:
     status: str = "draft"           # draft | rendered | pushed | failed
     wx_media_id: str = ""
     error: str = ""
+    # 推草稿时固化的发布属性（原创声明 / 合集）与后台补齐结果，仅内存态，不入库
+    wx_attrs: dict = field(default_factory=dict)
 
     def to_row(self) -> dict:
         return {

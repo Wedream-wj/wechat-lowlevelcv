@@ -124,8 +124,83 @@ def extract_json(text: str) -> dict:
     raise LLMError("JSON 括号不闭合（输出很可能被截断）")
 
 
+def _strip_markdown_heading(text: str) -> str:
+    """剥掉标题行上的 markdown 修饰：# 前缀、** 加粗、行尾 #、首尾引号。"""
+    t = text.strip()
+    t = re.sub(r"^#{1,4}\s*", "", t)
+    t = re.sub(r"\s*#{1,4}$", "", t)
+    t = re.sub(r"^\*\*(.+?)\*\*$", r"\1", t)
+    t = t.strip("\"'“”「」《》").strip()
+    return t
+
+
+# 模型不守「title」键名时的常见别名（实测出现过「标题」）
+_TITLE_ALIAS_KEYS = ("标题", "article_title", "headline", "paper_title", "name", "Title")
+
+
+def recover_title(spec: dict, raw: str = "", items: list[Item] | None = None) -> bool:
+    """title 缺失/为空时的降级提取，按可靠度从高到低试四层，命中即写入并返回 True。
+
+    背景：实测模型输出了 5373 字符的完整正文（finish=stop），却因为 JSON 里
+    没有 "title" 这个键被 validate_spec 一票否决，两次重写同样阵亡——
+    正文都写了，为一个键名整篇作废太亏。降级顺序：
+      1) JSON 里的常见别名键（"标题"/"headline"/"article_title"…）；
+      2) 整份规格被包进唯一子对象（{"article": {...}}）时解包；
+      3) JSON 前后残留文本里的 markdown 一级标题或加粗标题行；
+      4) 素材元数据兜底（第一条素材的论文标题，总好过整篇失败）。
+    """
+    if isinstance(spec.get("title"), str) and spec["title"].strip():
+        return False
+
+    # 1) 别名键
+    for key in _TITLE_ALIAS_KEYS:
+        v = spec.get(key)
+        if isinstance(v, str) and v.strip():
+            spec["title"] = v.strip()
+            return True
+
+    # 2) 唯一子对象解包：子对象里才是真正的 sections（title 修好后整体上提）
+    if not isinstance(spec.get("sections"), list) or not spec["sections"]:
+        for v in spec.values():
+            if (isinstance(v, dict) and isinstance(v.get("sections"), list)
+                    and v["sections"]):
+                has_title = isinstance(v.get("title"), str) and v["title"].strip()
+                if not has_title and not recover_title(v, raw, items):
+                    continue
+                spec.clear()
+                spec.update(v)
+                return True
+
+    # 3) JSON 之外的残留文本：模型偶尔在 JSON 前后补一行 markdown 大标题
+    if raw:
+        start, end = raw.find("{"), raw.rfind("}")
+        outside = raw[:start] + raw[end + 1:] if 0 <= start < end else raw
+        for line in outside.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            m = re.match(r"^#{1,3}\s+\S", s) or re.match(r"^\*\*\S.*\*\*[：:]?\s*$", s)
+            if m:
+                t = _strip_markdown_heading(s)
+                if t:
+                    spec["title"] = t
+                    return True
+
+    # 4) 素材元数据兜底：第一条素材标题（后续 enforce_title_rules 还会清洗 venue）
+    for it in items or []:
+        t = (getattr(it, "title", "") or "").strip()
+        if t:
+            spec["title"] = t
+            return True
+    return False
+
+
 def validate_spec(spec: dict) -> dict:
-    """最低限度校验，避免空稿把渲染器搞崩。"""
+    """最低限度校验，避免空稿把渲染器搞崩。
+
+    title 缺失时不该直接判死——recover_title 已在调用前做过降级提取，
+    这里保留硬校验作为最后防线（降级也兜不出来才报错）。
+    """
     if not isinstance(spec.get("title"), str) or not spec["title"].strip():
         raise LLMError("缺少 title")
     sections = spec.get("sections")
@@ -298,7 +373,9 @@ class LLMClient:
         raw, meta = await self._chat(messages, on_progress=on_progress)
         usage.add(module, meta["prompt"], meta["completion"])
         try:
-            return validate_spec(extract_json(raw))
+            spec = extract_json(raw)
+            recover_title(spec, raw, items)
+            return validate_spec(spec)
         except LLMError as first_error:
             if meta.get("finish") == "length":
                 # 输出被 max_tokens 硬截断：重试只会再截一次，直接给出可操作的报错
@@ -316,6 +393,9 @@ class LLMClient:
                 {"role": "user", "content": (
                     f"上面的输出不是合法的 ArticleSpec JSON（错误：{first_error}）。"
                     "请基于同一批素材重新输出完整 JSON，不要任何解释。"
+                    "【必须遵守】JSON 的第一个键必须是 \"title\"（字符串，文章大标题，<= 34 字），"
+                    "键名一字不差，严禁写成「标题」/「headline」等别名，"
+                    "严禁省略该字段或把标题放在 JSON 之外。"
                 )},
             ]
             if on_progress:
@@ -326,7 +406,9 @@ class LLMClient:
             raw2, meta2 = await self._chat(messages, on_progress=on_progress)
             usage.add(module, meta2["prompt"], meta2["completion"])
             try:
-                return validate_spec(extract_json(raw2))
+                spec = extract_json(raw2)
+                recover_title(spec, raw2, items)
+                return validate_spec(spec)
             except LLMError as exc:
                 raise LLMError(
                     f"模型两次输出均不合法：{exc}"

@@ -32,7 +32,7 @@ from urllib.parse import quote, quote_plus
 from ..config import topics
 from ..filters.scoring import score_item
 from ..models import Item
-from . import headless
+from . import contest_visual, headless
 from .base import HttpClient, strip_html
 
 try:  # 解析官方页 / 静态列表用；缺依赖时不至于整模块导入失败
@@ -1154,32 +1154,52 @@ async def fetch_contest_detail(client: HttpClient, item: Item) -> dict:
 
     这一步是「单篇深度精读」的素材底座：只有标题 + 一句摘要，七个维度里至少四个
     （数据、指标、周期、奖项）会变成模型编造。顺序是：普通请求 → 无头渲染兜底。
+
+    同一次页面抓取里顺手把**官方视觉**（og:image / Banner / 主视觉 / Logo / 正文样例图）
+    抽出来放进 ``detail["visuals"]``：封面阶段就不必再请求一遍赛事页，
+    而官方 Banner 往往只有渲染后才出现，静态 HTML 里根本没有。
     """
     detail = dict(item.extra.get("contest_detail") or {})
     url = str(item.extra.get("entry_url") or item.url or "")
     text = ""
+    visuals: list[dict] = []
     if url:
         try:
             body = await client.text(url)
         except Exception:
             body = ""
-        if body and not headless.looks_like_honeypot(body):
+        # 蜜罐（Codabench 直连返回《1984》随机段落）当空页处理，别把垃圾当素材
+        if body and headless.looks_like_honeypot(body):
+            body = ""
+        if body:
             try:
-                soup = BeautifulSoup(body, "lxml")
-                text = soup.get_text(" ", strip=True)
+                text = BeautifulSoup(body, "lxml").get_text(" ", strip=True)
             except Exception:
                 text = ""
+            visuals = contest_visual.extract_visuals(body, url, source="official",
+                                                     identity=item.title)
         # 赛事页八成是 SPA（天池 / Codabench / 天智杯都一样）：静态 HTML 只有壳，
-        # 650 字左右时直接判为「没拿到正文」，走无头渲染再取一次
+        # 650 字左右时直接判为「没拿到正文」，走无头渲染再取一次。
+        # 取 DOM 而不是纯文本：同一个渲染结果要同时供正文抽取与视觉抽取。
         if len(text) < 1200:
             try:
-                rendered = await headless.render_text(url, timeout=40.0, virtual_ms=12000)
+                rendered = await headless.render_dom(url, timeout=40.0, virtual_ms=12000)
             except Exception:
                 rendered = ""
-            if len(rendered) > len(text):
-                text = rendered
+            if rendered:
+                try:
+                    rendered_text = BeautifulSoup(rendered, "lxml").get_text(" ", strip=True)
+                except Exception:
+                    rendered_text = ""
+                if len(rendered_text) > len(text):
+                    text = rendered_text
+                    fresh = contest_visual.extract_visuals(rendered, url, source="official",
+                                                           identity=item.title)
+                    if len(fresh) > len(visuals):
+                        visuals = fresh
     text = strip_html(text, 9000)
     detail["page_excerpt"] = text[:3000]
+    detail["visuals"] = visuals[:6]
     detail["timeline"] = [raw for _, raw in find_dates(text, future_only=True)][:8]
     detail["prize_hint"] = _snippet_lines(text, ("奖金", "奖池", "prize", "usd", "$", "万元"), 3)
     detail["metrics_hint"] = _snippet_lines(text, _METRIC_HINTS, 6)

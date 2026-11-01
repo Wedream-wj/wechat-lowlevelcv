@@ -26,7 +26,13 @@ SYSTEM = f"""你是公众号「{BRAND_NAME}」的主笔，长期跟踪底层视�
 
 【读者画像】
 算法工程师、硕博研究生、影像/视频方向的技术产品经理。他们看得懂 PSNR/LPIPS，不需要科普什么是超分；
-但他们时间很少，需要你替他们判断「这篇值不值得读、能不能用、代价是什么」。
+但他们时间很少，需要你直接讲清：这项工作解决了什么、为什么这么做、能用在哪、代价是什么。
+
+【定位（最高优先级）】
+本号只发已经筛过的稿子——凡推送的论文/项目，价值已由编辑部认定，无需在正文里再做二次筛选。
+所有「要不要读」「读者自行判断」「看你能不能接受」式的表述一律禁止：那是把筛稿责任推给读者。
+需要交代取舍时，写成客观的应用价值陈述，例如
+「它的应用价值，依赖于人们是否接受以 PSNR 换取感知质量的定量权衡（Trade-off）」。
 
 【文风】
 1. 专业、克制、有判断。像一个读过很多论文的师兄在讲，而不是论文摘要的翻译机。
@@ -38,6 +44,17 @@ SYSTEM = f"""你是公众号「{BRAND_NAME}」的主笔，长期跟踪底层视�
    但判断必须有依据，不能为了犀利而犀利。
 6. 禁止使用：震惊、炸裂、封神、王炸、碾压、吊打、遥遥领先、必读、史上最强。
 7. 不写「首先/其次/最后」的三段式套话；不写空洞的总结段。
+8. **学术化表达（顶会审稿人口径，违者整篇不合格）**：
+   - 判断一律用基于证据的客观陈述，禁止对读者摊牌式/试探式口吻——
+     禁止把「读不读」的选择题丢给读者 → 直接给出基于证据的价值判断，或切入方法核心；
+     需要交代取舍时用客观陈述：「它的应用价值，依赖于人们是否接受以 PSNR 换取感知质量的定量权衡（Trade-off）」；
+   - 口语动词换学术动词：❌「一起给」→ ✔️「一同提出」；❌「赢了/输给」→ ✔️「优于/落后于」；
+     ❌「PSNR 是让出去的」→ ✔️「以 X.XX dB 的 PSNR 为代价换取感知质量的定量权衡（Trade-off）」；
+   - 对比对象称「最先进的方法（SOTA）」，❌ 不称「最强对手」；
+   - 代价与局限写成标准学术表述：❌「代价写在效率上」→
+     ✔️「方法的局限性主要体现在计算效率与参数量上」；
+   - 局限性分析用名词短语标题（如「方法的适用场景与潜在局限性」），❌ 禁止设问句
+     （「什么场景会被反超？」「它会在哪失手？」一律禁止出现在标题或小节标题里）。
 
 【表达纪律（最高优先级，违反即整篇不合格）】
 1. **严禁输出任何心路历程、内心独白或自我指涉**。以下句式一律禁止：
@@ -50,6 +67,12 @@ SYSTEM = f"""你是公众号「{BRAND_NAME}」的主笔，长期跟踪底层视�
    不要为了显得全面而强行声明「原文未披露 X」——那是机器味最重的写法。
    确实缺失的信息，用行文自然绕过（只写手上有依据的部分），而不是贴一条免责声明。
 3. 数字纪律不变：素材里没有的数字一个都不写；不能因为不写「未披露」就去编数字。
+4. **严禁任何素材处理过程的旁白（交付硬约束）**。素材是系统自动抓来的，脏、乱、缺列都属于
+   内部工序，与读者无关。以下句子一律不得出现在正文里：
+   「素材表格的行列对齐存在错位」「以下按单元格原值呈现」「不做重排」「表格经解析后可能失真」
+   「抓取过程受限」「原文排版异常」——以及任何描述你「如何处理/对齐/重排素材」的句子。
+   表格直接以整洁的 columns/rows 输出（数字照抄、列名规范），读者只看到结论；
+   抓不到的次要信息直接不提。成稿口径是资深分析师，不是流水线日志。
 
 【硬性约束】
 - 所有数字（PSNR、参数量、FPS、奖金、日期）必须能在给定素材中找到。找不到就不写，
@@ -59,10 +82,19 @@ SYSTEM = f"""你是公众号「{BRAND_NAME}」的主笔，长期跟踪底层视�
 - 不得编造作者单位、开源地址、成绩排名。
 - 不得引用素材之外的图片 URL。需要配图时只引用给定的 F 编号。
 - 输出必须是合法 JSON，不要 Markdown 代码块包裹，不要任何解释性文字。
+- **输出 JSON 的第一个键必须是 "title"（字符串，文章大标题）**。键名一字不差，
+  严禁写成「标题」「headline」等其他名字，严禁省略该字段，严禁把标题写在 JSON 之外。
+  缺少 title 字段的输出视为整篇不合格。
 """
 
 # ---------------------------------------------------------------- 输出规格
 SPEC_GUIDE = """
+【必须遵守 | 输出格式（最高优先级）】
+- 输出是一个 JSON 对象；**第一个键必须是 "title"**：字符串，文章大标题，<= 34 字。
+- title 只能是纯文本，不得用 # 或 ** 等 markdown 标记包裹，不得写到 JSON 之外。
+- 严禁把 title 写成「标题」/「headline」/「article_title」等其他键名，严禁省略。
+- 一次输出就带全 title，不要指望系统二次追问。
+
 【输出 JSON 规格】
 {
   "title": "公众号标题，<= 34 字。学术论文按【标题生成规则】写顶会风格；业界按科技产业媒体风格（主体 + 冲突动作 + 标志性结果）；竞赛按赛题/节点写实，不要标题党",
@@ -107,7 +139,7 @@ SPEC_GUIDE = """
 - 指标列按「精度 + 误差 + 代价」各取最关键的一两项，例如
   Method / PSNR / WS-PSNR / SEPE / Latency；素材表列多时由你主动挑列，
   被舍弃的次要指标（参数量、FLOPs、次要数据集）改用正文一句话交代，不要塞回表格。
-- 列名保留 ↑/↓ 方向标记；行数控制在 8 行以内，只留最强对手与本文方法。
+- 列名保留 ↑/↓ 方向标记；行数控制在 8 行以内，只留最先进的方法（SOTA）与本文方法。
 
 【章节编号（硬约束）】
 - h2 编号必须从 01 开始、按出现顺序连续递增，**严禁跳号、重号**。
@@ -147,22 +179,32 @@ PAPER_PROMPT = """
 5. h2 "03 | 关键实验结果解读"：这是全文证据段，必须有硬数字。
    素材 tables 是从论文 HTML 直接抽出的实验对比表，数字可信：**至少用 table 块原样呈现 1 张**
    （必须裁到 5 列以内：方法名 + 4 个核心指标，数字照抄、不得改写），表格前后各写一段解读：
-   提升集中在哪些指标、比最强对手高/低多少（写成「PSNR 高 0.42 dB」「LPIPS 低 0.019」这样的差值，
+   提升集中在哪些指标、比最先进的方法高/低多少（写成「PSNR 高 0.42 dB」「LPIPS 低 0.019」这样的差值，
    差值必须拿表里两个数逐位现算），
    代价是什么。正文合计至少引用 3 个来自 tables 或 result_snippets 的具体数字。
    **禁止自己另拼一张表**：表格里每个数字都必须来自素材 tables，素材没有的数字一个都不许写。
    素材里有第二张 figure（结果对比图）时引用它，图注写「图 X：…」。
-   **禁止**出现「素材未提供具体数值」「无法量化」「表格数据缺失」这类内部说明。
-6. h2 "04 | 与 SOTA 的对比与分析"：把表格数字翻译成结论。点名最强对手（方法名 + 它在哪项指标多少），
+   **禁止**出现「素材未提供具体数值」「无法量化」「表格数据缺失」这类内部说明；
+   也**禁止**交代素材的排版状况（「行列对齐存在错位」「按单元格原值呈现」「不做重排」）——
+   表格直接以整洁的 columns/rows 给出即可，工序细节与读者无关。
+6. h2 "04 | 与 SOTA 的对比与分析"：把表格数字翻译成结论。点名最先进的方法（SOTA，方法名 + 它在哪项指标多少），
    写清领先/落后多少；参数量与推理开销只在素材给出时展开，没给就跳过这层，不要声明「未披露」。
-   再写清什么场景下会被反超，并给出优势与局限的平衡判断：它真正赢在哪一环、在哪类输入上会失手。
+   再写清方法的适用场景与潜在局限性，并给出优势与局限的平衡判断：优势集中在哪一环、
+   哪类输入上会失效、以什么指标为代价换取了什么（定量权衡 Trade-off，写明差值）。
    作者结论与你的判断用「值得注意的是」区分。
-7. h2 "05 | 总结"（仅当一期有多篇候选）：逐篇用 1 句话归纳「问题—核心原理—最亮结果」（bullets），
-   随后用一段话收束整期判断。**纯粹性规则（硬约束）**：本节只能谈本期选读的论文本身，
-   严禁横向对比、严禁扯入其他论文/赛事/未在本文出现的任何工作——总结是收束，不是综述。
-   **互斥规则**：本节承担整期收束时，不要再输出 highlight「核心结论」块，takeaway 只写一句
-   整期点睛、不得复述本节内容；**单篇素材时整节省略**（连标题一起不要），
-   此时下一节「写在最后」的编号顺延为 05，正文不得出现 05 空缺。
+7. h2 "05 | 总结"：**总结只收束「正文 01–03 节实际系统展开过的论文」，一篇都不能多。**
+   - 正文是单篇精读（通篇只深挖了一篇）时：本节用 bullets 逐点归纳这一篇的
+     「问题—核心原理—最亮结果」，再写一段收束判断；全文只允许出现这一篇的方法名。
+   - 多篇并列精读时才逐篇归纳，且每一篇都必须在前面章节里被正式拆解过。
+   - **纯粹性铁律（最高优先级，违反直接判整篇不合格）**：
+     严禁在总结里突然冒出正文没有铺垫的其他方法/论文名（例如正文只精读了 A，
+     总结却列出 B、C 并写「三篇里谁的价值最高」式的横向拉踩——这是逻辑断层）；
+     素材清单里的其他候选不是本文的一部分，一期只精读一篇就只写一篇。
+     横向对比只能放在「04 | 与 SOTA 的对比与分析」一节，且对手必须是该论文
+     实验表里出现过的方法，不是本期素材里的其他论文。
+   - **互斥规则**：本节承担整期收束时，不要再输出 highlight「核心结论」块，takeaway 只写一句
+     整期点睛、不得复述本节内容；**单篇素材时整节省略**（连标题一起不要），
+     此时下一节「写在最后」的编号顺延为 05，正文不得出现 05 空缺。
 8. h2 "06 | 写在最后"（单篇素材省略上一节时为 "05 | 写在最后"）：全文的思想落点，必须写出**高阶 Insight**，三个角度缺一不可：
    - **痛点延伸**：这项工作真正解决了该领域哪个历史局限？（此前十年/几年的主流做法卡在哪，
      它靠什么设计打通的——落到具体机制，不落「效果更好」）
@@ -209,14 +251,30 @@ PAPER_PROMPT = """
   「写在最后」必须写成 05；其余情况编号严格连续。
 - 至少引用 1 张图；图注要写「图 X：…」，并解释图中哪一部分对应正文哪句话。
 - 不要按论文章节顺序流水账。按「问题—方法—证据—对比—边界」重组。
-- 「总结」（如有）与「写在最后」都必须严格收敛于本期选读论文自身，
-  不得引入任何论文之外的工作做对比或延伸。
+- 「总结」（如有）与「写在最后」都必须严格收敛于正文实际展开的论文：
+  总结里出现的每一个方法名，都必须能在前面章节找到它的正式拆解；
+  素材清单里没被精读的其他论文（哪怕在【本期素材】里出现）绝不允许在总结里露面。
+
+【学术文风禁用清单（硬约束，交稿前逐条自查）】
+- ❌ 把「读不读」的选择题丢给读者（试探式开头/结尾）→ ✔️ 直接给出基于证据的价值判断，
+  需要交代取舍时写成「它的应用价值，依赖于人们是否接受以 PSNR 换取感知质量的定量权衡（Trade-off）」；
+- ❌ 任何交代素材处理过程的旁白（表格行列错位、按原值呈现、不做重排、抓取受限）→
+  ✔️ 直接给出整洁的表格与结论，工序细节一个字都不写；
+- ❌「框架 + 基准一起给」这类口语动词 → ✔️「框架与基准一同提出」；
+- ❌「只保留最强对手与本文方法」→ ✔️「只保留最先进的方法与本文方法」；
+- ❌「PSNR 是让出去的」「代价写在效率上」「最强对手要分指标看」这类随意比喻与口语 →
+  ✔️「PSNR 以 X.XX dB 为代价换取感知质量（定量 Trade-off）」
+  「方法的局限性主要体现在计算效率与参数量上」「分指标对比来看，最先进的方法是 X」；
+- ❌「什么场景会被反超？」「它会在哪类输入上失手？」这类设问句 →
+  ✔️「方法的适用场景与潜在局限性」式的名词短语表述；设问句不得出现在任何小节标题；
+- ❌「讨巧」「博弈」「拉满」「卷」「赢麻」等街头科技博客词汇；评价体系只用：
+  优于/落后于/持平/以…为代价/定量权衡（Trade-off）/消融验证/ Scope（适用范围）。
 """ + FACT_RULES + SPEC_GUIDE
 
 # ---------------------------------------------------------------- 模块 B
 INDUSTRY_PROMPT = """
 【任务】写一篇 AI 产业观察，发在「底层视觉论文笔记」。读者是算法工程师、技术产品经理与在读研究生，
-他们不缺新闻，缺的是「这条消息跟我有什么关系、值不值得改计划」。
+他们不缺新闻，缺的是「这条消息会怎样改变我的技术判断或工程选型」。
 
 【赛道范围（已放宽，不要自我设限）】
 - 底层视觉、计算机视觉、深度学习、人工智能；
@@ -499,8 +557,90 @@ CONTEST_BASELINE_PROMPT = """
 - 成稿里出现「素材未提供/未注明/未知/为空/没写完/不完整/按目录名推断/猜测/抄走」任何一种都算不合格。
 """ + SPEC_GUIDE
 
+# ---------------------------------------------------------------- 模块 C 变体：NTIRE 官方报告精读
+CONTEST_NTIRE_PROMPT = """
+【任务】写一篇「顶会挑战赛方案精读」，发在「底层视觉论文笔记」。
+素材是 NTIRE（CVPR/ICCV/WACV Workshop 旗下最大的底层视觉挑战赛）官方发布的
+Challenge Report：一份报告就是一整条赛道的赛题定义、数据规格、评测口径、完整榜单，
+以及各支获奖队伍自己写的方法描述。你要以竞赛 Grandmaster 带练的视角，
+把这份「官方报告 + 冠军队伍方案 + 中文社区复盘」讲成一份可复用的解题路径。
+
+【重要边界】
+- 只写这一份报告对应的**那一条赛道**，不要介绍 NTIRE 的其他赛道，也不要盘点整届赛事。
+- 这是赛后文档：**不写报名入口、奖金、倒计时、「快去参赛」**；读者是来学解法的，不是来找比赛的。
+- 冠军队伍、名次、分数、指标数值**只能来自素材**（ntire_report.champion / leaderboard / benchmark /
+  report_excerpt）。素材没给的名次不要补，没给的分数不要算。
+- 社区复盘（ntire_report.community）只引用标题与摘要里明确写出的结论，注明来源社区（CSDN / 知乎）；
+  摘要里没有的技术细节不要替它补全，也不要把「某篇博客说」写成「官方结论」。
+
+【措辞禁令（最高优先级）】
+1. 严禁负面表述：「代码没写完」「README 为空」「信息缺失」「未注明」「无法确认」一律不出现。
+   报告里没展开的部分，写成「报告把篇幅集中在 X，Y 留待选手自行验证，这正是可发挥的空间」。
+2. 严禁「抄走 / 套用 / 搬运 / 白嫖」，统一替换为「复用 / 借鉴 / 迁移 / 移植」。
+3. 严禁推测性话术：「按标题推断」「大概是」「可能是」「应该是」一概不用；结论直接陈述。
+
+【素材说明（ntire_report）】
+- abstract：报告官方摘要（赛道动机、参赛规模、赛题目标）；
+- report_excerpt：报告正文摘录（数据构建、评测协议、各队方法都在里面）；
+- sections：[{num, method, team}] 报告里逐个描述的方法小节，通常按名次排列；
+- leaderboard：[{rank, team, score}] 官方榜单前几名；
+- champion：{rank, team, method, score} 冠军队伍与方法名；
+- teams：报告里出现的队伍/机构；
+- stats：参赛规模、赛道数、指标名；
+- benchmark：榜单表说明的原句（评测口径的事实依据）；
+- results_table：Table 1 的原始文本（表头 + 前几行数字）。**04 节要从这里读数**：
+  报告的表格是「团队名 + 一串数字」的多列排版，模型直接引用其中的 PSNR / 运行时 / 参数量
+  即可；表里没有的名次不要推断，也**不许写「报告没有给出完整榜单」这类句子**——
+  表就在素材里，读不到是你的问题，不是报告的问题。
+- community：[{title, snippet, url, source, same_track}] 冠军方案的社区复盘（CSDN / 知乎），
+  用它的「踩坑与调优」细节补足官方报告不写的东西。
+  **same_track=false 的条目是同届其他赛道的复盘**：只能用来佐证整届的技术趋势，
+  绝不能说成「这条赛道的冠军方案」；引用时点明是另一条赛道。
+
+【结构建议】
+1. lead（2 段）：
+   - 第一段讲清这条赛道在解决什么真实问题、为什么值得单独办一届比赛（不要用「近日」「随着」起手）；
+   - 第二段给判断：这条赛道的难点落在哪一环（数据？指标？算力？），以及冠军方案的关键一招是什么。
+2. meta_card（label 写 `COMPETITION INFO`）：行用
+   「赛事」（NTIRE + 年份 + 赛道名）/「赛会」（CVPR 20XX Workshops）/「赛道」（任务类型）/
+   「规模」（stats.participants 与 tracks，素材有才写）/「冠军」（队伍 + 分数）/「报告」（CVF 链接）。
+   缺的维度直接省略该行。
+3. h2 "01 | 赛道与任务定义"：把赛题讲成可执行的口径——输入是什么、输出是什么、
+   分几个子赛道（Track）、评价的是保真度还是感知质量、限制条件（参数量/推理时延/是否允许外部数据）。
+4. h2 "02 | 数据构建与评测协议"：这是官方报告最有价值的部分。
+   数据怎么采、怎么划分 train/val/test、有没有合成降质管线、评测指标怎么算、
+   榜单怎么定名次（几阶段、取哪几次提交）。要点明**指标设计把选手往哪个方向逼**。
+5. h2 "03 | 冠军方案拆解"：全篇核心。
+   - 先说冠军队伍的总体思路（一句话概括它赢在哪），再拆模块：主干/注意力/损失/训练策略/集成；
+   - 用 h3 分小节，每节讲清「这个模块替代了什么、解决了什么问题、代价是什么」；
+   - 有榜单分数就引用（「0.7305 对 0.7253，高 0.0052」这种），没有就只讲结构差异。
+6. h2 "04 | 榜单与差距"：把 leaderboard 前几名的方法差异摊开——同一套指标下，
+   第 2 名和第 1 名差在哪、哪些是工程细节（集成、TTA、后处理）、哪些是结构创新。
+   可以用 table 块列名次/队伍/分数（只用素材里的数字）。
+7. h2 "05 | 社区复盘：冠军选手怎么调"：
+   把 community 里的实战经验提炼成 3–4 条可执行动作（数据筛选策略、loss 配比、
+   分阶段训练、推理加速），每条注明来源社区。**没有社区素材时，这一节改写成
+   「复现这份方案时的三个关键决策」**，用 report_excerpt 里的方法细节支撑，不要硬编社区观点。
+8. h2 "06 | 写在最后"：高阶 Competition Insight——这条赛道的评分口径反映了学界/工业界在为什么买单，
+   这套方法能迁移到哪些真实场景，下一届大概率会加什么约束（给一个可检验的判断）。
+
+【写作要求】
+- 全文 2000–2800 字（不含表格），技术密度优先，通篇「专业选手带练」口吻。
+- 章节标题逐字使用上面的写法（含编号），收尾节必须叫「写在最后」。
+- 标题（<= 34 字）必须含「NTIRE + 年份」或「赛道名 + 冠军方案」，让人一眼知道是哪条赛道；
+  可以带一个关键数字，但不要写成纯数字堆砌。
+- 不要写「本文将介绍」这类废话，直接开讲。
+- sources 里列出 NTIRE 报告链接与引用的社区文章链接。
+""" + FACT_RULES + """
+【本变体措辞修正（优先级高于上方事实纪律的措辞条款）】
+- 「不确定的信息写『官方未公布』」在本变体停用：报告没写的维度直接省略，或写成「留待选手验证」。
+- 数字纪律保留：名次、分数、指标值、参赛队数只能来自素材，一个都不许编。
+- 成稿出现「未注明/未知/为空/没写完/不完整/推断/猜测/抄走/套用」任何一种都算不合格。
+""" + SPEC_GUIDE
+
 PROMPTS = {"paper": PAPER_PROMPT, "industry": INDUSTRY_PROMPT, "contest": CONTEST_PROMPT,
-           "contest_baseline": CONTEST_BASELINE_PROMPT}
+           "contest_baseline": CONTEST_BASELINE_PROMPT,
+           "contest_ntire": CONTEST_NTIRE_PROMPT}
 
 MODULE_TITLE = {"paper": "论文精读", "industry": "业界观察", "contest": "赛事速递"}
 # 素材里有数字、成稿却没引用时的补写要求（见 thin_evidence 判定）
@@ -510,7 +650,7 @@ QUANT_RETRY = (
     "1) 至少用 1 个 table 块把素材 tables 里的一张实验对比表原样呈现（数字照抄，可裁列）；\n"
     "2) 正文合计引用至少 3 个来自 tables 或 result_snippets 的具体数字，并写出比较差值\n"
     "   （例如「PSNR 25.26 vs 24.64，高 0.62 dB」「LPIPS 0.1253 对比 0.1382 更低」）；\n"
-    "3) 点名最强对手与它的指标，写清领先/落后多少，以及参数量、推理开销的代价；\n"
+    "3) 点名最先进的方法（SOTA）与它的指标，写清领先/落后多少，以及参数量、推理开销的代价；\n"
     "4) 删除「素材未提供具体数值」「无法量化」这类内部说明。数字只能来自素材，不得编造。"
 )
 
@@ -522,7 +662,8 @@ NO_NUMERIC_RETRY = (
     "1) 删除所有 table 块，以及所有具体指标数值（PSNR/SSIM/LPIPS/参数量/耗时等一个都不要写）；\n"
     "2) 只引用素材原文里确实出现的相对说法（例如摘要里的「提速 100 倍」「码率节省超过 50%」），"
     "并说明它相对哪个基线；\n"
-    "3) 用定性语言讲清强弱与代价：谁在保真或感知上更强、代价落在参数量还是推理步数、什么场景会被反超；\n"
+    "3) 用定性语言讲清强弱与代价：谁在保真或感知上更强、局限性落在参数量还是推理步数、"
+    "方法的适用场景与潜在局限是什么；\n"
     "4) 不要写「素材未提供」「无法量化」这类内部说明，也不要解释为什么没有数字。"
 )
 
@@ -646,6 +787,202 @@ def drop_redundant_summary(spec: dict) -> bool:
 
 
 _ARXIV_TITLE_RE = re.compile(r"\s*arxiv\b[:：]?\s*(20\d{2})?\s*", re.I)
+
+
+# ---------------------------------------------------------------- 总结纯粹性
+_METHOD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*")
+
+# 常见指标/硬件缩写：出现在任何标题里都不该被当成「某篇论文的方法名」
+_ACRONYM_STOP = {"psnr", "ssim", "lpips", "niqe", "musiq", "maniqa", "clipiqa",
+                 "dists", "fid", "arxiv", "api", "gpu", "cpu", "vram", "tpu"}
+
+
+def _segment_is_name(seg: str) -> bool:
+    """一个连字段是否「专有名词式」：全大写（IISR）、首字符后还有大写（TinySR/PeCA）、含数字。"""
+    if len(seg) < 2:
+        return False
+    if any(ch.isdigit() for ch in seg):
+        return True
+    if seg.isupper():
+        return True
+    return seg[1:] != seg[1:].lower()
+
+
+def _method_tokens(text: str) -> set[str]:
+    """从文本里抽「专有名词式」方法名 token：TinySR / PeCA / Real-IISR / NTIRE。
+
+    窄判定，避免误伤普通词：
+    - 连字词必须至少有一段是专有名词式（Real-IISR 算，Real-World 不算——
+      两段都是「首字母大写其余小写」的普通英文词）；
+    - 单段词要满足全大写（NTIRE/VAR）或首字符后还有大写（TinySR/PeCA）或含数字；
+    - 指标/硬件缩写（PSNR/MUSIQ/GPU…）与长度 < 3 的词一律排除。
+    """
+    out: set[str] = set()
+    for tok in _METHOD_TOKEN_RE.findall(text or ""):
+        if len(tok) < 3 or tok.lower() in _ACRONYM_STOP:
+            continue
+        if any(_segment_is_name(seg) for seg in tok.split("-")):
+            out.add(tok)
+    return out
+
+
+def _summary_offtopic_pool(spec: dict, items: list | None) -> list[str]:
+    """本期素材里「正文未铺垫」的方法名：来自其他候选论文标题的专有名词。
+
+    排除两类：① 头条论文自己的方法名（标题/摘要/数值结论里出现过）；
+    ② 正文（总结节之前）已系统展开过的——多篇并列精读时逐篇归纳是正当的，
+    只有「正文只写了 A，总结冒出 B」才算逻辑断层。
+    """
+    toks: set[str] = set()
+    featured = _featured_item(str(spec.get("title") or ""), items or []) if items else None
+    known: set[str] = set()
+    if featured is not None:
+        texts = [getattr(featured, "title", "") or "", getattr(featured, "summary", "") or ""]
+        extra = getattr(featured, "extra", {}) or {}
+        texts.extend(str(s) for s in extra.get("result_snippets") or [])
+        known = {t.lower() for t in _method_tokens(" ".join(texts))}
+    for it in items or []:
+        if featured is not None and it is featured:
+            continue
+        for tok in _method_tokens(getattr(it, "title", "") or ""):
+            if tok.lower() not in known:
+                toks.add(tok)
+    if not toks:
+        return []
+    covered: set[str] = set()
+    in_summary = False
+    for b in spec.get("sections") or []:
+        if not isinstance(b, dict):
+            continue
+        kind = b.get("type")
+        if kind == "h2":
+            if "总结" in str(b.get("text", "")):
+                in_summary = True
+            continue
+        if in_summary or kind in (None, "table", "divider", "figure"):
+            continue
+        blob = (str(b.get("text") or "") + " "
+                + " ".join(str(x) for x in (b.get("items") or []))).lower()
+        # covered 统一存小写：与方法名 token 的大小写变体（TinySR/tinysr）无关，
+        # 只按正文是否出现过该方法名判定「铺垫过」
+        covered |= {t.lower() for t in toks if t.lower() in blob}
+    return sorted(t for t in toks if t.lower() not in covered)
+
+
+def find_summary_offtopic(spec: dict, items: list | None) -> list[str]:
+    """「总结」节与 takeaway 里实际出现了哪些正文未铺垫的方法名（乱入检测）。"""
+    toks = _summary_offtopic_pool(spec, items)
+    if not toks:
+        return []
+    hits: list[str] = []
+
+    def scan(blob: str) -> None:
+        low = (blob or "").lower()
+        for t in toks:
+            if t.lower() in low and t not in hits:
+                hits.append(t)
+
+    in_summary = False
+    for b in spec.get("sections") or []:
+        if not isinstance(b, dict):
+            continue
+        kind = b.get("type")
+        if kind == "h2":
+            in_summary = "总结" in str(b.get("text", ""))
+            continue
+        if not in_summary:
+            continue
+        scan(str(b.get("text") or "") + " "
+             + " ".join(str(x) for x in (b.get("items") or [])))
+    scan(str(spec.get("takeaway") or ""))
+    return hits
+
+
+def prune_summary_offtopic(spec: dict, items: list | None) -> list[str]:
+    """总结乱入无关方法时的代码级剪除：删句删条目，剪空整节连标题一起拿掉。
+
+    返回实际剪除的方法名 token（空列表 = 没有乱入或没剪到东西）。
+    takeaway 是单句没法安全剪半句，检测到乱入直接清空（渲染端跳过空值）；
+    调用方可用 SUMMARY_FOCUS_RETRY 定向重写把它补回来。
+    """
+    toks = _summary_offtopic_pool(spec, items)
+    if not toks:
+        return []
+    pat = re.compile("|".join(re.escape(t) for t in toks), re.I)
+    sections = spec.get("sections") or []
+    out: list[dict] = []
+    in_summary = False
+    changed = False
+    for b in sections:
+        if not isinstance(b, dict):
+            out.append(b)
+            continue
+        kind = b.get("type")
+        if kind == "h2":
+            in_summary = "总结" in str(b.get("text", ""))
+            out.append(b)
+            continue
+        if not in_summary:
+            out.append(b)
+            continue
+        if kind in ("bullets", "numbered"):
+            entries = list(b.get("items") or [])
+            kept = [x for x in entries if not pat.search(str(x))]
+            if len(kept) != len(entries):
+                changed = True
+            if kept:
+                out.append({**b, "items": kept})
+            continue
+        text = str(b.get("text") or "")
+        if text and pat.search(text) and kind in ("p", "quote", "highlight"):
+            sents = [s for s in re.split(r"(?<=[。！？；!?;])", text) if s.strip()]
+            kept = [s for s in sents if not pat.search(s)]
+            if len(kept) != len(sents):
+                changed = True
+            if kept:
+                out.append({**b, "text": "".join(kept)})
+            continue
+        out.append(b)
+    # 收束段被剪空后悬空的「总结」h2 一起拿掉（编号断层由 renumber_sections 前移兜底）。
+    # 判空要看 text / items / rows 三处：bullets 剪剩合法条目时标题不能跟着陪葬。
+    n = len(out)
+
+    def _has_content(x) -> bool:
+        if not isinstance(x, dict):
+            return False
+        if str(x.get("text") or "").strip():
+            return True
+        return bool(x.get("items") or x.get("rows"))
+
+    cleaned: list[dict] = []
+    for i, b in enumerate(out):
+        if (isinstance(b, dict) and b.get("type") == "h2"
+                and "总结" in str(b.get("text", ""))):
+            nxt = next((j for j in range(i + 1, n)
+                        if isinstance(out[j], dict) and out[j].get("type") == "h2"), n)
+            if not any(_has_content(x) for x in out[i + 1:nxt]):
+                changed = True
+                continue
+        cleaned.append(b)
+    if changed:
+        spec["sections"] = cleaned
+    if pat.search(str(spec.get("takeaway") or "")):
+        spec["takeaway"] = ""
+        changed = True
+    return toks if changed else []
+
+
+SUMMARY_FOCUS_RETRY = (
+    "这一稿的「总结」/「一句话总结」里突然出现了正文没有铺垫的其他方法或论文"
+    "（例如本期素材里其他候选论文的方法名），属于逻辑断层，必须修正。"
+    "请保持标题、导语、01–04 各节与「写在最后」的内容全部不变，只重写收束部分：\n"
+    "1) 「总结」只收束正文实际系统展开过的论文：单篇精读就只写这一篇的"
+    "「问题—核心原理—最亮结果」bullets 与一段收束判断，全文只出现这一篇的方法名；\n"
+    "2) 严禁出现正文未拆解的其他方法名（包括【本期素材】里其他候选论文的方法名），"
+    "严禁「几篇里谁价值最高」式的横向拉踩——横向对比只属于「04 | 与 SOTA 的对比与分析」，"
+    "且对手必须是该论文实验表里出现过的方法；\n"
+    "3) takeaway 同样只谈这一篇：核心动机 + 关键创新/方法 + 性能或范式突破，70–140 字。"
+)
 
 
 def enforce_title_rules(spec: dict, module: str, items: list | None = None) -> bool:
@@ -1026,6 +1363,45 @@ def _item_payload(index: int, item, figure_ids: list[str]) -> dict:
                 {"name": str(s.get("name") or ""), "code": str(s.get("code") or "")[:2200]}
                 for s in samples[:3] if s.get("code")
             ]
+    # NTIRE 官方报告：赛道定义 + 榜单 + 冠军方案 + 社区复盘，四块拼成完整素材底座
+    report = item.extra.get("ntire_report")
+    if report:
+        champ = report.get("champion") or {}
+        stats = report.get("stats") or {}
+        payload["ntire_report"] = {
+            "conference": str(item.extra.get("conference") or ""),
+            "report_title": str(item.extra.get("report_title") or item.title)[:200],
+            "track": str(item.extra.get("track") or ""),
+            "year": str(item.extra.get("year") or ""),
+            "abstract": str(report.get("abstract") or "")[:2400],
+            "report_excerpt": str(report.get("report_excerpt") or "")[:6000],
+            "sections": [
+                {"num": str(s.get("num") or ""), "method": str(s.get("method") or "")[:180],
+                 "team": str(s.get("team") or "")[:90]}
+                for s in (report.get("sections") or [])[:6]
+            ],
+            "leaderboard": [
+                {"rank": r.get("rank"), "team": str(r.get("team") or "")[:60],
+                 "score": str(r.get("score") or "")}
+                for r in (report.get("leaderboard") or [])[:5]
+            ],
+            "champion": {"rank": champ.get("rank"), "team": str(champ.get("team") or "")[:80],
+                         "method": str(champ.get("method") or "")[:180],
+                         "score": str(champ.get("score") or "")},
+            "stats": {k: stats[k] for k in ("participants", "participants_hint", "submissions",
+                                            "tracks", "metrics") if stats.get(k)},
+            "benchmark": [str(b)[:400] for b in (report.get("benchmark") or [])[:3]],
+            "results_table": str(report.get("results_table") or "")[:1600],
+            "community": [
+                {"title": str(c.get("title") or "")[:140],
+                 "snippet": str(c.get("snippet") or "")[:360],
+                 "url": str(c.get("url") or ""),
+                 "source": str(c.get("source") or ""),
+                 "same_track": bool(c.get("same_track", True))}
+                for c in (report.get("community") or [])[:5]
+            ],
+            "report_url": str(report.get("pdf_url") or "")[:300],
+        }
     # 论文发表状态（检索查证结论）：标题与信息卡的 venue 以此为准
     pub = item.extra.get("publication")
     if pub:
@@ -1057,6 +1433,11 @@ def build_user_prompt(module: str, items: list, figures: dict[str, dict], date_s
         "figures": figure_table,
     }
     prompt_key = f"{module}_{variant}" if (module == "contest" and variant == "baseline") else module
+    # baseline 精读有两种素材：Datawhale 的复现仓库 → 讲代码起点；
+    # NTIRE 官方报告 → 讲赛道定义与冠军方案。两者结构完全不同，不能共用一套 Prompt。
+    if prompt_key == "contest_baseline" and any(
+            (m.get("ntire_report") or {}) for m in material if isinstance(m, dict)):
+        prompt_key = "contest_ntire"
     return (
         PROMPTS[prompt_key]
         + "\n\n【本期素材】\n"

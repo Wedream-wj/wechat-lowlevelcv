@@ -25,3 +25,8 @@ pillow>=10.2
 
 # --- 可选：PDF 首页渲染（没装时自动降级到 arXiv HTML 首图） ---
 pymupdf>=1.24
+
+# --- 可选：推草稿后回后台自动勾「文字原创」+ 选合集「每日推送」 ---
+# 只装这个 Python 包即可，浏览器复用系统 Edge/Chrome（沿用 HEADLESS_BROWSER 的查找逻辑），
+# 不用 `playwright install chromium` 再下 150MB。没装时推送照常，只是这两项降级为待办清单。
+# playwright>=1.44

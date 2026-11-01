@@ -442,6 +442,18 @@ competitions:
     # Datawhale「竞赛Baseline」开源仓库：往届赛题 baseline 复现合集（学习资源，非赛事）
     # 覆盖深度学习/AI 泛领域（不限于底层视觉）；进精读候选池的数量上限
     max_items: 30
+  ntire:
+    # CVF Open Access 上的 NTIRE 官方挑战赛报告：赛道定义 + 数据规格 + 评测口径 + 完整榜单
+    # + 各队方法描述，是 baseline 精读里信息密度最高的一类素材（学习资源，非赛事）
+    enabled: true
+    menu_url: https://openaccess.thecvf.com/menu
+    # 近 N 届 workshop（CVPR / ICCV / WACV 都算），同届里按赛道匹配度排序
+    editions: 3
+    # 进精读候选池的报告数（同届 NTIRE 常有 30+ 份报告，全收会淹没 Datawhale 那一路）
+    max_items: 12
+    # 报告 PDF 分段下载上限：整本 2–3MB 在慢网络下要 3 分钟；实测 0.8MB（≈20 页）
+    # 已含摘要、赛道定义、榜单表与全部方法小节，剩下的是参考文献
+    pdf_bytes: 800000
   tianchi:
     enabled: true
     list_url: https://tianchi.aliyun.com/competition/activeList
@@ -518,6 +530,23 @@ pipelines:
     layout: contest
     require_figures: 0
     max_chars: 2200
+
+# ---------- 封面图 ----------
+cover:
+  # 公众号大图封面规范 2.35:1（推荐 900×383）：按这个比例出图，
+  # 微信再按 2.35:1 二次裁切也不会切到标题
+  width: 1080
+  height: 460
+  # 各模块的选图分数线：低于阈值就退品牌底图（宁缺毋滥，赛事尤其严格）
+  #   paper    架构图 / teaser 天然高分，杂图很难混进来
+  #   industry 官网 og:image 与 README 头图分不高，阈值放低一点
+  #   contest  只认官方视觉 / 数据集样例 / baseline 框架图，其余一律不用
+  min_score:
+    paper: 3.4
+    industry: 2.6
+    contest: 3.2
+  # 单次最多试几张候选：每张都要下载 + 体检，别为了封面把出稿拖到几分钟
+  try_limit: 6
 
 # cron 表达式（APScheduler，默认时区 Asia/Shanghai）
 schedule:

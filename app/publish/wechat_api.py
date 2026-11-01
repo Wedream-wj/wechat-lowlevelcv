@@ -21,6 +21,7 @@ from ..imaging import (
     MATERIAL_IMAGE_MAX_BYTES,
     normalize_file,
 )
+from .attrs import PublishAttrs, assert_draft_payload, build_draft_payload
 
 BASE = "https://api.weixin.qq.com"
 TOKEN_CACHE = settings.db_path.parent / "wx_token.json"
@@ -70,6 +71,10 @@ class WeChatClient:
         self.appid = settings.wx_appid
         self.secret = settings.wx_secret
         self._client = httpx.AsyncClient(timeout=60, follow_redirects=True)
+        # 最近一次 draft/add 的载荷与发布属性（审计快照 / 单测断言用）
+        self.last_payload: dict = {}
+        self.last_attrs: PublishAttrs | None = None
+        self.last_include_attrs: bool = False
 
     async def __aenter__(self) -> "WeChatClient":
         return self
@@ -230,7 +235,10 @@ class WeChatClient:
         return "".join(parts)
 
     async def add_draft(self, *, title: str, author: str, digest: str, content: str,
-                        thumb_media_id: str, source_url: str = "") -> str:
+                        thumb_media_id: str, source_url: str = "",
+                        attrs: "PublishAttrs | None" = None) -> str:
+        """新建草稿。发布属性（原创声明 + 合集）由 PublishAttrs 固化，推送前断言。"""
+        attrs = attrs or PublishAttrs.from_settings()
         article = {
             "title": title[:64],
             "author": author[:16],
@@ -241,7 +249,13 @@ class WeChatClient:
             "need_open_comment": settings.wx_need_open_comment,
             "only_fans_can_comment": 0,
         }
-        data = await self._post("/cgi-bin/draft/add", json_body={"articles": [article]})
+        payload, include = build_draft_payload(article, attrs)
+        assert_draft_payload(payload, attrs, include_attrs=include)
+        # 留一份给上层做审计快照 / 单测断言「到底发了什么」
+        self.last_payload = payload
+        self.last_attrs = attrs
+        self.last_include_attrs = include
+        data = await self._post("/cgi-bin/draft/add", json_body=payload)
         media_id = data.get("media_id", "")
         if not media_id:
             raise WeChatError(f"草稿创建未返回 media_id：{data}")

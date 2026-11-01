@@ -278,6 +278,92 @@ async def fetch_hackcv(client: HttpClient) -> list[Item]:
 
 
 # ------------------------------------------------------------------ 补正文
+
+# 正文图的最小可信宽度：站点装饰条 / 分隔线一般不会超过这个宽度。
+# 具体像素级体检（空白/比例/尺寸不足）仍由 cover_select._probe 在下载后做，
+# 这里只做「不值得下载」的粗筛，省请求。
+_MIN_FIG_WIDTH_HINT = 320
+
+
+def extract_article_figures(html: str, base: str, max_figs: int = 6) -> list[dict]:
+    """从报道正文里抽「封面候选图」，按正文出现顺序返回。
+
+    为什么必须抓正文图：量子位这类媒体的 og:image 是**全站 logo**（实测），
+    列表页缩略图只有 200px 上下（体检必挂）——两者都拿不到封面时，
+    正文插图（产品图 / 发布会现场 / 架构示意）是唯一符合「图文相配」的来源。
+
+    过滤规则（宁可漏，不可错）：
+    - 只要正文容器里的图（.content .article / article / main / .post-content），
+      侧栏、评论区、相关推荐的图一律不进封面候选；
+    - URL 特征 junk（badge/头像/二维码/logo/icon）直接丢；
+    - <img> 带了 width 且小于下限的丢（没写 width 的交给下载后体检）；
+    - 图注取 alt / title / figcaption / 相邻说明文字，判角色和审计都用得上。
+    返回元素与 cover_select.cover_candidates 的字段约定一致：
+    {url, caption, source, role, referer}
+    """
+    from .base import abs_url
+
+    soup = BeautifulSoup(html or "", "lxml")
+    container = None
+    for sel in (".content .article", "article", ".post-content", ".article-content",
+                "main", ".entry-content"):
+        node = soup.select_one(sel)
+        if node is not None and node.find("img"):
+            container = node
+            break
+    if container is None:
+        return []
+
+    out: list[dict] = []
+    for img in container.find_all("img"):
+        # 作者栏 / 文章信息区的头像不算正文配图（实测量子位 head.jpg 200×200 在 .article 里）
+        if img.find_parent(class_="article_info") or img.find_parent(class_="author"):
+            continue
+        src = str(img.get("src") or img.get("data-src") or img.get("data-original") or "").strip()
+        if not src or src.startswith("data:"):
+            continue
+        url = abs_url(base, src)
+        low = url.lower()
+        if any(bad in low for bad in ("logo", "badge", "avatar", "qrcode", "qr-code",
+                                      "icon", "favicon", "emoji", "shields.io",
+                                      "1x1", "spacer", "loading", "placeholder",
+                                      "head.jpg", "weixin", "wechat")):
+            continue
+        try:
+            w_hint = int(str(img.get("width") or "0").rstrip("px"))
+        except ValueError:
+            w_hint = 0
+        if 0 < w_hint < _MIN_FIG_WIDTH_HINT:
+            continue
+        # 图注：alt → title → figcaption → 父块文本（量子位的图说明常在 <p> 里）
+        caption = strip_html(str(img.get("alt") or img.get("title") or ""), 120)
+        if not caption:
+            fig = img.find_parent("figure")
+            if fig is not None:
+                cap_node = fig.find("figcaption")
+                if cap_node is not None:
+                    caption = strip_html(cap_node.get_text(" ", strip=True), 120)
+        if not caption:
+            holder = img.find_parent(["p", "div"])
+            if holder is not None:
+                text = strip_html(holder.get_text(" ", strip=True), 120)
+                # 说明文字必须「短且非正文段落」：长段是正文，拿它当图注会误导
+                if 0 < len(text) <= 60 and "：" not in text[:2]:
+                    caption = text
+        # 第 0 张 = 报道主视觉（body-hero），其余交由词表判角色
+        out.append({
+            "url": url, "caption": caption, "source": "media",
+            "role": "", "referer": base,
+        })
+        if len(out) >= max_figs:
+            break
+    # 角色判定延后到调用方（cover_select.classify），避免循环 import；
+    # 只有第一张无条件拿 body-hero——量子位正文首图就是编辑选的主视觉
+    for i, fig in enumerate(out):
+        fig["order"] = i
+    return out
+
+
 async def enrich(client: HttpClient, items: list, max_items: int = 4) -> int:
     """给入选的量子位条目回抓正文：首页摘要只有一句话，撑不起一篇产业解读。"""
     limit_chars = int(_cfg("qbitai").get("enrich_chars", 3000))
@@ -295,4 +381,28 @@ async def enrich(client: HttpClient, items: list, max_items: int = 4) -> int:
         if text:
             item.extra["full_text"] = text
             done += 1
+        # 正文配图 → 封面候选（cover_select._from_items 直接消费 cover_candidates）。
+        # 量子位 og:image 是全站 logo（实测），列表页缩略图又只有 ~200px，
+        # 不抓正文图的话业界稿几乎必然退品牌底图——这是「封面空洞」的主因。
+        try:
+            figs = extract_article_figures(html, base=item.url)
+        except Exception:
+            figs = []
+        if figs:
+            item.extra["cover_candidates"] = figs
+        # 列表页缩略图也不丢：留作正文图全挂时的最后一路候选
+        if not item.images and item.extra.get("cover_candidates"):
+            first = item.extra["cover_candidates"][0]
+            item.images = [first["url"]]
+            item.image_url = first["url"]
+        elif not item.images:
+            m = re.search(
+                r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\']'
+                r'[^>]+content=["\']([^"\']+)', html or "")
+            # 量子位的 og:image 是全站 logo（实测），不是文章头图——带 logo 字样的
+            # 一律不要，宁可退品牌底图，也不能拿站点 logo 当文章封面
+            if m and m.group(1).startswith("http") and "logo" not in m.group(1).lower():
+                item.images = [m.group(1)]
+                if not item.image_url:
+                    item.image_url = m.group(1)
     return done

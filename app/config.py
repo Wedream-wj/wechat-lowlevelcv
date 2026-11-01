@@ -161,6 +161,18 @@ class Settings:
     wx_author: str = field(default_factory=lambda: _env("WX_AUTHOR", "底层视觉论文笔记"))
     wx_thumb_media_id: str = field(default_factory=lambda: _env("WX_THUMB_MEDIA_ID"))
     wx_need_open_comment: int = field(default_factory=lambda: int(_env("WX_NEED_OPEN_COMMENT", "1")))
+    # 发布属性（硬默认，每次推草稿必带）：原创声明 + 合集归属。
+    # 微信开放接口 draft/add、freepublish/submit 都没有这两个字段（社区官方回复「不支持」），
+    # 所以默认通过后台 UI 自动化补勾；这两项只在这里改，代码里不许写死第二份。
+    wx_original_type: str = field(default_factory=lambda: _env("WX_ORIGINAL_TYPE", "文字原创"))
+    wx_collection: str = field(default_factory=lambda: _env("WX_COLLECTION", "每日推送"))
+    # 是否把这两项写进 draft/add 的 payload（微信当前会忽略/拒收未定义字段，默认关）。
+    # 将来接口开放、或走第三方代调用通道时置 1 即可原样下发，无需改代码。
+    wx_draft_extra_fields: bool = field(default_factory=lambda: _env_bool("WX_DRAFT_EXTRA_FIELDS", False))
+    # 推完草稿后是否用 Playwright 回后台勾「文字原创」+ 选合集（默认为否，需要登录态）
+    wx_ui_fill: bool = field(default_factory=lambda: _env_bool("WX_UI_FILL", False))
+    # 已登录的浏览器存储态（playwright codegen / storage_state 导出），省去每次扫码
+    wx_storage_state: str = field(default_factory=lambda: _env("WX_STORAGE_STATE", ""))
 
     # 运行
     out_dir: Path = field(default_factory=lambda: Path(_env("LLCV_OUT", str(ROOT / "out"))))

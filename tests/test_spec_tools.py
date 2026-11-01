@@ -16,9 +16,12 @@ from app.spec_tools import (
     merge_event_rows,
     normalize_meta_cards,
     normalize_section_titles,
+    normalize_wording,
     normalized_spec,
     prune_spec_tables,
     renumber_sections,
+    scrub_process_narration,
+    scrub_reader_burden,
     strip_countdown_title,
     strip_meta_time,
 )
@@ -247,6 +250,89 @@ class TestCountdownTitle(unittest.TestCase):
         self.assertNotIn("days_left", _item_payload(1, item, []))
         item.extra["contest_detail"]["registration_closed"] = False
         self.assertEqual(_item_payload(1, item, [])["days_left"], 3)
+
+
+class TestWording(unittest.TestCase):
+    """「抄作业 / 套用 / 搬运」这类词 Prompt 明令禁止，但模型会换说法回来。"""
+
+    def test_banned_words_replaced(self):
+        spec = {"lead": ["先说结论：这段代码可以直接抄走。"],
+                "sections": [
+                    {"type": "p", "text": "这是整篇报告里最值得抄作业的一处。"},
+                    {"type": "bullets", "items": ["先套用它的数据管道", "搬运过来改两行"]},
+                ],
+                "takeaway": "照着抄一遍不如理解一遍。"}
+        self.assertGreaterEqual(normalize_wording(spec), 4)
+        blob = " ".join([*spec["lead"], spec["takeaway"],
+                         *[b.get("text", "") for b in spec["sections"]],
+                         *[i for b in spec["sections"] for i in (b.get("items") or [])]])
+        for bad in ("抄走", "抄作业", "套用", "搬运", "抄一"):
+            self.assertNotIn(bad, blob)
+        self.assertIn("借鉴", blob)
+
+    def test_clean_spec_untouched(self):
+        spec = {"sections": [{"type": "p", "text": "可直接复用其数据处理 Pipeline。"}]}
+        self.assertEqual(normalize_wording(spec), 0)
+
+
+class TestReaderBurdenScrub(unittest.TestCase):
+    """本号「只挑值得读的那几篇」，推送即已筛选——不能把选择题丢回给读者。"""
+
+    def test_tradeoff_sentence_is_recast(self):
+        spec = {"lead": ["DreamSR 给出了一条折中路线。"
+                         "它值不值得读，取决于你是否接受以 PSNR 换取感知质量的"
+                         "定量权衡（Trade-off）。"],
+                "sections": [], "takeaway": ""}
+        self.assertGreaterEqual(scrub_reader_burden(spec), 1)
+        para = spec["lead"][0]
+        self.assertNotIn("值不值得读", para)
+        self.assertIn("它的应用价值，依赖于人们是否接受以 PSNR 换取感知质量的", para)
+
+    def test_bare_question_dropped_keeps_rest(self):
+        spec = {"sections": [{"type": "p",
+                              "text": "值不值得读？如果做全景方向，这是最干净的设计。"}]}
+        self.assertEqual(scrub_reader_burden(spec), 1)
+        self.assertEqual(spec["sections"][0]["text"], "如果做全景方向，这是最干净的设计。")
+
+    def test_block_removed_when_all_burden(self):
+        spec = {"sections": [{"type": "p", "text": "值不值得读？读者自行判断。"}]}
+        self.assertEqual(scrub_reader_burden(spec), 2)   # 两句各算一处
+        self.assertEqual(spec["sections"], [])
+
+    def test_takeaway_cleaned(self):
+        spec = {"sections": [], "takeaway": "值不值得读？这是一次干净的重构。"}
+        scrub_reader_burden(spec)
+        self.assertNotIn("值不值得读", spec["takeaway"])
+
+    def test_clean_text_untouched(self):
+        spec = {"sections": [{"type": "p", "text": "它的应用价值，依赖于人们是否接受取舍。"}]}
+        self.assertEqual(scrub_reader_burden(spec), 0)
+
+
+class TestProcessNarrationScrub(unittest.TestCase):
+    """素材表格错位、抓取受限属于内部工序，一个字都不该出现在正文里。"""
+
+    def test_alignment_complaint_dropped(self):
+        spec = {"sections": [{"type": "p",
+                              "text": "下表摘自论文在 RealSR 与 DRealSR 两个基准上的对比。"
+                                      "需要说明的是，素材表格的行列对齐存在错位，"
+                                      "以下按单元格原值呈现，不做重排。"}]}
+        self.assertEqual(scrub_process_narration(spec), 1)
+        self.assertEqual(spec["sections"][0]["text"],
+                         "下表摘自论文在 RealSR 与 DRealSR 两个基准上的对比。")
+
+    def test_crawl_limit_complaint_dropped(self):
+        spec = {"sections": [{"type": "p", "text": "受抓取限制影响，部分行缺失。"
+                                                   "作者在 4 个基准上做了验证。"}]}
+        scrub_process_narration(spec)
+        self.assertNotIn("抓取限制", spec["sections"][0]["text"])
+        self.assertIn("4 个基准", spec["sections"][0]["text"])
+
+    def test_table_block_kept(self):
+        spec = {"sections": [{"type": "table", "header": ["Method", "PSNR"],
+                              "rows": [["Ours", "38.68"]]}]}
+        self.assertEqual(scrub_process_narration(spec), 0)
+        self.assertEqual(spec["sections"][0]["rows"], [["Ours", "38.68"]])
 
 
 class TestTableCompaction(unittest.TestCase):

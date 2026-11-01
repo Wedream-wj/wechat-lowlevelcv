@@ -259,7 +259,8 @@ async def push(issue_id: str, request: Request) -> dict:
         article = await push_issue(issue_id)
     except PipelineError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {"ok": True, "issue_id": article.issue_id, "media_id": article.wx_media_id, "status": article.status}
+    return {"ok": True, "issue_id": article.issue_id, "media_id": article.wx_media_id,
+            "status": article.status, "attrs": article.wx_attrs}
 
 
 @app.get("/api/wechat/check")
