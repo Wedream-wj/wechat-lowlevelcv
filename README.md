@@ -151,6 +151,7 @@ wechat-lowlevelcv/
 ### 模块 A · 学术论文
 
 - **数据源**：`lowlevelcv.com/papers-selection`（最新 3 页，含分类/摘要/示意图/代码链接，`?current=N` 翻页）；arXiv API（`cat:cs.CV` + 关键词，按提交时间倒序）；Papers With Code（API 不稳定，静默降级）。
+- **指定论文名称检索成稿**（2026-11-03 新增）：控制台论文卡片的「按论文名精读」输入框 / `python -m scripts.demo paper --query "<论文名>"` / `POST /api/run/paper {"query": "..."}`。链路（`sources/paper_search.py`）：**OpenAlex → Crossref → Europe PMC → Semantic Scholar → Google Scholar → ScienceDirect → IEEE Xplore** 七路并发，各自留 trace（成功/被反爬/超时都点名）；归一化标题相似度（SequenceMatcher + 词级 Jaccard）≥ 0.72 才算命中——宁可报「未找到」，绝不把同领域的相似标题论文当成目标；多源记录按 DOI/标题合并（OpenAlex 元数据最全、Crossref 期刊名最权威，只补缺不覆盖）。全文链：OA pdf → 出版商 DOI 落地页 `citation_pdf_url` → Semantic Scholar OA 镜像（`.env` 配 `S2_API_KEY` 走独立配额，匿名池实测长期 429）→ **Sci-Hub 默认禁用**（`academic.paper_search.scihub_enabled`，镜像分发未授权副本，默认只在开放获取/授权渠道内工作）。素材提取（`sources/paper_pdf.py`）双通道：Europe PMC 全文 XML 给干净表格（含「IoU 分组 × R/P/F1」两行表头的自动合并 `R@0.5`）、数值结论句与 32000 字全文；PDF 只干「按图注区域整块渲染插图」——架构图/流程图常由几十个图块拼成，取图注上方位图+矢量绘图并集以 2.5x+ 缩放整块渲染（`Flowchart/architecture` 判 arch，定性示例判 result），表格若走 PDF 通道必须过单元格合理性校验（竖排断行如「8409\n.」整表判废，宁缺毋假）。成稿 100% 继承论文模块全套规范：venue 信誉规则（Crossref 核实的期刊名上标题）、数字逐字核对、总结纯粹性、推草稿「文字原创 + 每日推送」。同名指标（含中文指标名→英文表头）的跨表差值已加入数字核对白名单（`_METRIC_ALIASES`），「精确率 80.22→84.00，提高 3.78」不再误判为编造，跨指标蒙差值（PSNR 差冒充 MUSIQ 差）仍然拦截。
 - **筛选**：核心词（low-level vision / super-resolution…）3 分、任务词（去雾/去噪/压缩…）2 分、外围词 1 分；会议等级（CVPR/ICCV/ECCV/NeurIPS/TPAMI…）与时效指数衰减加权；相似标题去重 + 同方向最多 2 条的多样性约束。阈值在 `topics.yaml → academic.filter`。
 - **配图**：熵视示意图 / arXiv HTML 按 caption 关键词（architect/overview/pipeline…）挑架构图 / PyMuPDF 渲染 PDF 首页，三级兜底。
 - **版式**：导语 → 论文信息卡（meta_card）→ 01 问题 → 02 方法拆解（架构图 + 模块讲解）→ 03 实验（表格）→ 04 代价与边界 → 05 顺带值得一看。
@@ -291,7 +292,7 @@ challenge report：赛题定义、数据规格、评测协议、完整榜单、�
 python -m unittest discover -s tests -v
 ```
 
-覆盖（377 例）：lowlevelcv 解析器（用真实页面夹具）、评分与筛选、JSON 修复、Spec 校验、微信渲染（内联样式/转义/内联语法）、Markdown 导出、图片格式归一、四个赛事源的解析与蜜罐识别、报名状态判定与练习赛门槛、赛事/业界封面选图、标题自审、观点内化、发布属性断言、以及业界「事件级查重 / 同批合并 / 主题纯粹性清洗 / 数字核对」（`tests/test_industry_focus.py`）。
+覆盖（406 例）：lowlevelcv 解析器（用真实页面夹具）、评分与筛选、JSON 修复、Spec 校验、微信渲染（内联样式/转义/内联语法）、Markdown 导出、图片格式归一、四个赛事源的解析与蜜罐识别、报名状态判定与练习赛门槛、赛事/业界封面选图、标题自审、观点内化、发布属性断言、业界「事件级查重 / 同批合并 / 主题纯粹性清洗 / 数字核对」（`tests/test_industry_focus.py`）、以及指定论文检索的「标题匹配 / 多源合并 / JATS 表格 / 图注区域渲染 / 单元格校验 / Sci-Hub 合规默认」（`tests/test_paper_search.py`）。
 
 ## 9. 部署建议
 
@@ -325,3 +326,5 @@ python -m unittest discover -s tests -v
 - 学术化文风：SYSTEM 与 PAPER_PROMPT 加【学术文风禁用清单】（禁对读者摊牌式开头、口语动词「一起给/赢了/让出去」、设问句小节标题）；对比对象统一称「最先进的方法（SOTA）」。`spec_tools.normalize_wording(spec, module)` 新增 `_ACADEMIC_WORDING_FIXES`（仅 paper 模块）：「代价写在效率上」→「方法的局限性主要体现在计算效率与参数量上」、「最强对手」→「最先进的方法」、「X 是让出去的」→「X 属于主动的定量取舍（Trade-off）」等，成稿出口强制替换。
 - 叙述纪律（推送即已筛选）：正文严禁把「读不读」的选择题丢回读者（「值不值得读，取决于你是否…」），统一改写成客观的应用价值陈述（「它的应用价值，依赖于人们是否接受以 PSNR 换取感知质量的定量权衡（Trade-off）」）；也严禁任何素材处理过程的旁白（「表格行列对齐存在错位」「按单元格原值呈现」「不做重排」「抓取受限」）——工序细节与读者无关，表格直接以整洁格式输出。SYSTEM 加【定位】与表达纪律第 4 条；代码层 `spec_tools.scrub_reader_burden`（有取舍信息的句子改写、纯反问句删除）与 `scrub_process_narration`（整句删除）在 pipeline 成稿出口再兜一道，删空的段落/bullet 整块拿下。
 - 业界「选题去重 + 主题强收敛 + 实事求是」（2026-11-01 定稿，针对两起实测事故：同日连出两篇 OpenAI 融资稿；融资快讯里夹「ECCV 2026 论文 SparkVSR 开源，仓库 745 stars」）：Prompt 写入**单一事件铁律**——全篇只写一个核心事件，其它公司动态、同日其它消息、素材里的论文与仓库统计一律不得进入标题/导语/正文/信息卡/图注/takeaway/sources；判据是「删掉这句，主线判断是否受损」；禁用「同期还有/与此同时/另一条消息」拼盘句式。代码层三道闸 + 两道兜底：事件级查重（`filters/events.py`，实体 + 事件类型 + 窗口，默认 14 天）拦「换数字重写」；`collapse_same_event` 把同批重复事件并成一条主条，其余只作交叉核对信源；`pick_subject` 把 3 条备战收敛成 1 条主角（优先有回抓正文的一手报道）；`prune_industry_offtopic` 按句/按条/按卡行删噪声（论文·仓库·stars·更新日期、第二家公司动态、不属于主线的来源链接），删空的章节连标题一起拿掉再重排编号；`unsupported_industry_numbers` 要求金额/比例/算力/千级量级能在主线素材原文（含 `full_text`）逐字找到（同一句素材内两数相减算合法换算），命中即定向重写一次。标题侧新增 `industry_title_issues`（绕弯句式 / 空话营销词 / 缺主体 / 夹带论文仓库）与 `_sanity_check_industry_title`（模型只重出标题 → 兜底退回洗过的素材原题）。**已知取舍**：事件判重是启发式——中文公司名依赖词表 + 机构后缀，标题完全不点主体的重复稿只能靠标题相似度兜底；`event_dedupe_days` 调大会更保守（少重复、也可能少选题）。验证：`tests/test_industry_focus.py` 33 例；`scripts/verify_industry_focus.py` 联网体检三闸；`python -m scripts.demo industry` 实跑出稿（实测 178 条候选 → 标题闸挡 18 条 → 收敛为 DeepSeek Super-agent 单一事件，成稿零论文/仓库噪声、零第二家公司）。
+
+- 指定论文名称检索（2026-11-03）：「全网」的诚实口径——OpenAlex/Crossref/EuropePMC/Semantic Scholar 四路 API 稳定可用，Google Scholar 无公开 API 且反爬（本机实测代理 502）、ScienceDirect/IEEE 检索页 403，这三路保留在链路里但失败只记 trace 不阻塞；出版商（MDPI/Elsevier）直链在本机网络被 Cloudflare 拦时，全文退 Europe PMC XML（OA 期刊）、插图退 Semantic Scholar OA 镜像，两者都不可得则封面走品牌底图、表格与数值句照常成稿。Sci-Hub 链路已实现但默认禁用（合规）。相似度阈值 0.72 是启发式：改写幅度极大的译名/缩写标题（如只输「PigMS」四个字符）会报「未找到」，这是刻意行为。

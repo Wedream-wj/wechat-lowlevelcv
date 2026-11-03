@@ -55,6 +55,8 @@ from .sources import MODULE_LABEL, arxiv, collect
 from .sources import chinese_media as _chinese_media
 from .sources import competitions as _competitions
 from .sources import cvf
+from .sources import paper_pdf as _paper_pdf
+from .sources import paper_search as _paper_search
 from .sources import publication as _publication
 from .sources.base import HttpClient
 from .spec_tools import (
@@ -236,6 +238,7 @@ async def _sanity_check_industry_title(spec: dict, item, llm, log) -> bool:
 async def run_module(module: str, *, publish: bool | None = None,
                      date_str: str | None = None, top_n: int | None = None,
                      demo: bool = False, variant: str | None = None,
+                     paper_query: str | None = None,
                      progress: Callable[..., None] | None = None) -> RunResult:
     """demo=True：走完整抓取/筛选/配图/成稿/渲染链路，但不写库、不记已用、不推送。
 
@@ -244,6 +247,11 @@ async def run_module(module: str, *, publish: bool | None = None,
     variant：成稿变体。目前仅 module="contest" 支持 "baseline"——
     整篇只围绕一份往届竞赛 baseline 复现展开：讲透它对应的原赛题、解题思路与关键代码，
     不与当下在办赛事强行关联。
+
+    paper_query：指定论文名称检索（仅 module="paper"）。给出后不做常规抓取与
+    评分筛选，改为全网多源检索这篇论文（OpenAlex/Crossref/EuropePMC/Semantic
+    Scholar/Google Scholar/ScienceDirect/IEEE → PDF/开放获取全文），整期只精读
+    这一篇——历史去重与关键词过滤都为它让路（用户点名要这篇，不是编辑部的选择）。
 
     progress(stage, pct, msg, event=False)：可选进度回调（控制台轮询用）。
     只在里程碑处发 event=True；进度回调自身绝不允许把流水线搞挂。
@@ -255,7 +263,12 @@ async def run_module(module: str, *, publish: bool | None = None,
     date_str = date_str or datetime.now().strftime(DATE_FMT)
 
     def _log(msg: str) -> None:
-        print(f"[pipeline:{module}] {msg}", flush=True)
+        try:
+            print(f"[pipeline:{module}] {msg}", flush=True)
+        except UnicodeEncodeError:
+            # GBK 控制台兜底：编不出的字符替换成 ?，日志绝不能打断出稿任务
+            print(f"[pipeline:{module}] {msg}".encode("ascii", errors="replace").decode("ascii"),
+                  flush=True)
 
     last_pct = 0
 
@@ -270,9 +283,30 @@ async def run_module(module: str, *, publish: bool | None = None,
         except Exception:  # 进度回调只影响展示，绝不能反向打断任务
             pass
 
+    targeted = module == "paper" and bool(str(paper_query or "").strip())
     try:
-        collect_cb = lambda p, m: report("抓取", 2 + int(p * 0.23), m, True)
-        items, collect_errors = await collect(module, progress=collect_cb)
+        if targeted:
+            # 指定论文检索：不跑常规抓取，多源定位这一篇（失败直接报因，不降级成随机选题）
+            query = str(paper_query).strip()
+            report("检索", 3, f"按论文名称全网检索：{query[:60]}", True)
+            async with HttpClient() as client:
+                hit = await asyncio.wait_for(
+                    _paper_search.search_paper(client, query), timeout=150.0)
+            for trace in hit.traces:
+                if trace.ok or trace.count:
+                    _log(f"检索源 {trace.describe()}")
+                else:
+                    errors.append({"source": f"检索·{trace.source}", "error": trace.note,
+                                   "level": "warn"})
+            items = [ _paper_search.build_item(hit) ]
+            _log(f"命中：{items[0].title}（{items[0].venue} {items[0].year}，"
+                 f"DOI {items[0].extra.get('doi') or '无'}，"
+                 f"引用 {items[0].extra.get('citations', 0)}，"
+                 f"OA PDF {'有' if items[0].extra.get('pdf_url') else '未直链'}）")
+            collect_errors = []
+        else:
+            collect_cb = lambda p, m: report("抓取", 2 + int(p * 0.23), m, True)
+            items, collect_errors = await collect(module, progress=collect_cb)
         errors.extend(collect_errors)
         _log(f"抓取 {len(items)} 条，源告警 {len(collect_errors)} 个")
         if not items:
@@ -299,7 +333,8 @@ async def run_module(module: str, *, publish: bool | None = None,
         else:
             learning_all, contests_all = [], list(items)
         learning_fresh = learning_all
-        if history_titles:
+        # 指定论文检索：用户点名要这篇，历史去重与关键词门槛都为它让路
+        if history_titles and not targeted:
             if contests_all:
                 contests_all, dup_contest = scoring.dedupe_history(contests_all, history_titles)
             else:
@@ -375,6 +410,9 @@ async def run_module(module: str, *, publish: bool | None = None,
             # 直接取 1 条的风险是「最高分那条恰好没有正文」，写出来全是空泛判断。
             want = min(max(int(top_n or 3), 1), 3)
             selected = scoring.select(items, topics, module, top_n=want, seen=seen)
+        elif targeted:
+            # 指定论文：单目标，整期只精读这一篇，不过评分关
+            selected = list(items)
         else:
             selected = scoring.select(items, topics, module, top_n=top_n, seen=seen)
         if not selected:
@@ -402,7 +440,31 @@ async def run_module(module: str, *, publish: bool | None = None,
         report("配图", 35, "补抓论文实验数据表与结论数字…", True)
         async with HttpClient() as client:
             # enrich 必须在 select 之后：它很贵（每篇一趟 HTML），只给入选的几篇补
-            if module == "paper":
+            if module == "paper" and targeted:
+                # 指定论文：PDF + 开放获取 XML 双通道取全文、表格、数值句与插图
+                report("配图", 40, "下载全文（PDF / 开放获取 XML）并提取图表…", True)
+                try:
+                    summary = await asyncio.wait_for(
+                        _paper_pdf.enrich_target(client, selected[0]), timeout=200.0)
+                except asyncio.TimeoutError:
+                    summary = {}
+                    msg = "指定论文全文下载超时（>200s），本期按摘要与元数据撰写"
+                    errors.append({"source": "指定论文全文", "error": msg})
+                    _log(msg)
+                except Exception as exc:
+                    summary = {}
+                    msg = f"指定论文全文提取失败：{type(exc).__name__}: {exc}"
+                    errors.append({"source": "指定论文全文", "error": msg})
+                    _log(msg)
+                _log(f"指定论文素材：PDF {summary.get('pdf', 0)//1024}KB / "
+                     f"OA-XML {'有' if summary.get('jats') else '无'} / "
+                     f"插图 {summary.get('figures', 0)} 张 / 表 {summary.get('tables', 0)} 张 / "
+                     f"数值句 {summary.get('snippets', 0)} 条 / "
+                     f"全文 {len(selected[0].extra.get('full_text') or '')} 字")
+                if not selected[0].images:
+                    _log("插图未取得（出版商反爬或 PDF 不可达），封面将走品牌底图，"
+                         "表格与数值句仍在（开放获取 XML 通道）")
+            elif module == "paper":
                 _log(f"补抓 {len(selected)} 篇论文的实验数据（每篇约 20–40s）")
                 try:
                     await asyncio.wait_for(
@@ -893,7 +955,10 @@ async def push_issue(issue_id: str, *, attrs: "PublishAttrs | None" = None) -> A
             ui = await mp_ui.fill_draft_attrs(article.title, attrs)
         except Exception as exc:  # 任何异常都不许回滚一次成功的推送
             ui = mp_ui.FillResult(reason=f"{type(exc).__name__}: {exc}")
-        print(f"[push:{article.module}] 发布属性 {attrs.describe}；{ui.describe()}", flush=True)
+        try:
+            print(f"[push:{article.module}] 发布属性 {attrs.describe}；{ui.describe()}", flush=True)
+        except UnicodeEncodeError:  # GBK 控制台兜底，ui.describe 里可能有 ✓/✗
+            print(f"[push:{article.module}] 发布属性 {attrs.describe}", flush=True)
 
         snapshot = write_snapshot(DraftRecord(issue_id=issue_id, attrs=attrs, media_id=media_id,
                                               include_attrs=include_attrs, ui_fill=ui.to_dict()))

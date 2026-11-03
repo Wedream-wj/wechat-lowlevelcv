@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,23 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(os.getenv("LLCV_CONFIG", ROOT / "config" / "topics.yaml"))
+
+
+def force_utf8_stdio() -> None:
+    """Windows 控制台默认 GBK 编码，「✓/✗」等字符会让 print 抛 UnicodeEncodeError。
+
+    这个异常若发生在管线内部会直接把整次出稿任务打死（真实事故：论文检索
+    trace 里的「✓ OpenAlex」炸掉整个成稿）。在服务进程入口把 stdout/stderr
+    重配为 UTF-8；重配失败也只是退回原状，不影响功能。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconf = getattr(stream, "reconfigure", None)
+        if reconf is None:
+            continue
+        try:
+            reconf(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------- .env

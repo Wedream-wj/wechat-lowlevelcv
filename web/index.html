@@ -64,6 +64,22 @@
   }
   button.cta-green:active{transform:translateY(0);box-shadow:0 1px 4px rgba(5,150,105,.3);}
   button.cta-green:disabled{box-shadow:none;}
+  /* 按论文名精读：紫色 CTA。蓝=常规出稿、绿=baseline 深挖、紫=指定论文全网检索——
+     三种「出稿动作」各占一个色相，扫一眼就知道点了会发生什么 */
+  button.cta-purple{
+    background:linear-gradient(135deg,#8B5CF6,#6D28D9);
+    border-color:#6D28D9;color:#fff;font-weight:600;letter-spacing:.2px;
+    box-shadow:0 2px 8px rgba(109,40,217,.26);
+    white-space:nowrap;
+  }
+  button.cta-purple:hover{
+    background:linear-gradient(135deg,#A78BFA,#6D28D9);
+    border-color:#5B21B6;color:#fff;
+    box-shadow:0 6px 16px rgba(109,40,217,.32);
+    transform:translateY(-1px);
+  }
+  button.cta-purple:active{transform:translateY(0);box-shadow:0 1px 4px rgba(109,40,217,.28);}
+  button.cta-purple:disabled{box-shadow:none;}
   button.danger{color:#C0392B;border-color:#F0C7C2;}
   button.danger:hover{background:#FDF1EF;border-color:#C0392B;}
   button.ghost{background:transparent;}
@@ -157,6 +173,12 @@
       <div class="actions">
         <button class="primary" onclick="run('paper', this)">生成一期</button>
         <button onclick="openPrompt('paper')">看 Prompt</button>
+      </div>
+      <div class="search-row" style="display:flex;gap:6px;margin-top:8px;">
+        <input id="paper-query" type="text" placeholder="输入论文名，全网检索后成稿精读"
+               style="flex:1;min-width:0;padding:6px 10px;border:1px solid var(--line,#d8dee9);border-radius:8px;font-size:12px;">
+        <button class="cta-purple" onclick="run('paper', this, {query: document.getElementById('paper-query').value})"
+                title="按论文名多源检索（OpenAlex / Crossref / Europe PMC / Semantic Scholar / Google Scholar / ScienceDirect / IEEE）并整期精读">按论文名精读</button>
       </div>
       <div class="runbox" id="runbox-paper" hidden>
         <div class="runbar"><div class="runbar-fill" id="bar-paper"></div></div>
@@ -344,7 +366,8 @@ async function run(module, btn, extra){
   const ui = resetRunbox(module);
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = "生成中…";
-  log(`开始生成「${MODULE_LABEL[module]}${extra && extra.variant ? " · baseline 精读" : ""}」，抓取 + 成稿通常需要 1–3 分钟…`);
+  const searching = extra && extra.query;
+  log(`开始生成「${MODULE_LABEL[module]}${extra && extra.variant ? " · baseline 精读" : ""}${searching ? " · 指定论文名检索：" + extra.query : ""}」，${searching ? "全网检索 + 全文提取 + 成稿" : "抓取 + 成稿"}通常需要 1–4 分钟…`);
   const startedAt = Date.now();
   ui.elapsed.textContent = "0s";
   const timer = setInterval(()=>{

@@ -172,6 +172,16 @@ academic:
     enabled: false
     endpoint: https://paperswithcode.com/api/v1/papers/
     max_results: 30
+  # 指定论文名称全网检索（web 控制台「按论文名精读」/ demo --query / POST /api/run/paper {"query": ...}）
+  paper_search:
+    # 单源检索超时（秒）；全部源并发执行
+    timeout_seconds: 60
+    # 匹配阈值：候选标题与查询的归一化相似度下限，低于它报「未找到」，绝不张冠李戴
+    match_threshold: 0.72
+    # Sci-Hub 镜像默认禁用：镜像分发的是未授权副本，本项目默认只在开放获取 /
+    # 授权渠道（OA PDF / 出版商 citation_pdf_url / Semantic Scholar OA 镜像）内工作。
+    # 确需启用由使用者自行承担合规责任。
+    scihub_enabled: false
   # 筛选参数
   filter:
     min_score: 6.0        # 低于这个分数不进候选池

@@ -789,6 +789,19 @@ PROMPTS = {"paper": PAPER_PROMPT, "industry": INDUSTRY_PROMPT, "contest": CONTES
            "contest_baseline": CONTEST_BASELINE_PROMPT,
            "contest_ntire": CONTEST_NTIRE_PROMPT}
 
+# 指定论文名称检索成稿（paper 模块）的追加铁律：用户点名「就写这一篇」，
+# 与常规选题的差别只在「目标外部指定」，写作规范一字不松。
+TARGETED_PAPER_RULES = """
+【指定论文模式（本期由用户点名检索，最高优先级）】
+1. 全篇只写素材里这一篇论文，任何其它论文 / 方法 / 模型名不得出现；
+   「04 | 与 SOTA 的对比与分析」的对比对象仅限该论文实验表格里出现过的基线方法。
+2. 素材来自论文全文（开放获取 XML / PDF）：tables 是论文原表、result_snippets 是
+   论文原句、figure 图注是论文原图注——数字与结论逐字取用，一个都不许改写或外推。
+3. 素材的 doi / citations / venue / authors 字段已由学术数据库（Crossref / OpenAlex /
+   Europe PMC）核实，信息卡按此填写，不得增删作者或更改期刊名。
+4. 元叙述沿用全局禁令：「经检索」「素材来自」「网络显示」等交代检索过程的句子一律禁止。
+"""
+
 MODULE_TITLE = {"paper": "论文精读", "industry": "业界观察", "contest": "赛事速递"}
 # 素材里有数字、成稿却没引用时的补写要求（见 thin_evidence 判定）
 QUANT_RETRY = (
@@ -821,7 +834,19 @@ _NUM_TOKEN_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _EVIDENCE_HEAD_RE = re.compile(r"^0?[34]\b|^0?[34]\s*[\|｜.、:：]")
 _PROSE_NUM_RE = re.compile(r"(?<![\d.])\d+\.\d+(?![\d.])(?!\s*[%％×倍x])")
 # 指标名：正文里「差值」跟着哪个指标，就只在该指标的数值行/列里核对
-_METRIC_RE = re.compile(r"HDR-VDP2|DISTS|MANIQA|MUSIQ|CLIPIQA|LPIPS|PSNR|SSIM|BPP", re.I)
+_METRIC_RE = re.compile(
+    r"HDR-VDP2|DISTS|MANIQA|MUSIQ|CLIPIQA|LPIPS|PSNR|SSIM|BPP"
+    r"|mAP|IoU|F1\s*score|F1|MAP|RECALL|PRECISION|ACCURACY"
+    r"|召回率|查全率|精确率|查准率|准确率", re.I)
+# 中文指标名 → 表头英文名：正文写「精确率」、表头写 "Precision (%)"，
+# 差值核对必须能跨语言对上，否则跨表差值全部误判成编造
+_METRIC_ALIASES = {
+    "RECALL": "RECALL", "召回率": "RECALL", "查全率": "RECALL",
+    "PRECISION": "PRECISION", "精确率": "PRECISION", "查准率": "PRECISION",
+    "ACCURACY": "ACCURACY", "准确率": "ACCURACY",
+    "F1 SCORE": "F1", "F1": "F1", "MAP": "MAP", "IOU": "IOU", "MIOU": "MIOU",
+    "PSNR": "PSNR", "SSIM": "SSIM", "LPIPS": "LPIPS", "BPP": "BPP",
+}
 
 
 def has_numeric_material(items: list) -> bool:
@@ -1539,8 +1564,16 @@ def _material_number_groups(items: list) -> list[tuple[set[float], list[list[flo
 
 
 def _metric_name(text: str) -> str:
-    m = _METRIC_RE.search(str(text))
-    return m.group(0).upper() if m else ""
+    """表头/正文的指标名归一：中文（精确率）、缩写（Precision）、
+    两行表头合并后的紧凑名（P@0.5）都归到同一个键。"""
+    text = str(text)
+    compact = re.match(r"^\s*([RP])@(\d+(?:\.\d+)?)", text, re.I)
+    if compact:
+        return "RECALL" if compact.group(1).upper() == "R" else "PRECISION"
+    m = _METRIC_RE.search(text)
+    if not m:
+        return ""
+    return _METRIC_ALIASES.get(m.group(0).upper().strip(), m.group(0).upper())
 
 
 def _metric_lines(items: list) -> dict[str, list[list[float]]]:
@@ -1587,14 +1620,26 @@ def _explained_by_material(tok: str, pool: set[str],
     for values, lines in groups:
         if any(round(n, decimals) == target for n in values):
             return True
-    if scoped:
+    def _diff_in(lines: list[list[float]]) -> bool:
         return any(round(abs(a - b), decimals) == target
-                   for line in scoped for i, a in enumerate(line) for b in line[i + 1:])
+                   for line in lines for i, a in enumerate(line) for b in line[i + 1:])
+
+    if scoped:
+        # 同名指标（含跨表）：正文写「精确率由 80.22% 升至 84.00%，提高 3.78」时，
+        # 两个原值常分属基线表与本文表——按「同名指标」归拢后允许并集内两数相减。
+        # 这仍然安全：2.82 那类事故是拿无关表的 PSNR 差蒙 MUSIQ 的差值，
+        # 指标名不同就进不了同一个并集。
+        flat: list[float] = []
+        for line in scoped:
+            flat.extend(line)
+        if _diff_in([flat]):
+            return True
+        # scoped 没对上时仍要回同表同行/同列闸门再核一遍：
+        # 紧凑表头（P@0.5）之外的列不在指标并集里，但同一列内的两数之差依然合法
+        # （IoU 表「精确率 86.33→92.77，提升 6.44」正是同一列跨行差）。
     for _values, lines in groups:
-        for line in lines:
-            if any(round(abs(a - b), decimals) == target
-                   for i, a in enumerate(line) for b in line[i + 1:]):
-                return True
+        if _diff_in(lines):
+            return True
     return False
 
 
@@ -1616,18 +1661,38 @@ def unsupported_prose_numbers(spec: dict, items: list) -> list[str]:
         if not in_evidence or kind == "table":
             continue
         blob = text + " " + " ".join(str(x) for x in (block.get("items") or []))
-        metrics = [(m.start(), m.group(0).upper()) for m in _METRIC_RE.finditer(blob)]
-        for m in _PROSE_NUM_RE.finditer(blob):
-            tok = m.group(0)
-            if tok in bad:
-                continue
-            name = ""
-            for pos, label in metrics:
-                if pos >= m.start():
-                    break
-                name = label
-            if not _explained_by_material(tok, pool, groups, metric_lines.get(name)):
-                bad.append(tok)
+        # 按句核对 + 指标就近归属。实测三种语序都要认：
+        # 「精确率由 80.22% 升至 84.00%，提高 3.78」（句内指标在前）；
+        # 「以极小的改动换取 0.0146 的 F1 提升」（指标在后）；
+        # 「前视图 F1 为 0.8376…；俯视图上由 0.9691 升至 0.9817，提升 0.0126」
+        # （本句没有指标名，承前句的 F1）。句内没有指标时继承上一句的归属，
+        # 但不许跳段——「一段里连写三组对比」靠句界隔开，不会张冠李戴。
+        last_name = ""
+        for sent in re.split(r"(?<=[。；！？!?])", blob):
+            metrics = [(m.start(), m.group(0).upper()) for m in _METRIC_RE.finditer(sent)]
+            sentence_name = ""
+            for m in _PROSE_NUM_RE.finditer(sent):
+                tok = m.group(0)
+                if tok in bad:
+                    continue
+                name = ""
+                before = [it for it in metrics if it[0] < m.start()]
+                if before:
+                    name = before[-1][1]
+                else:
+                    after = [it for it in metrics if it[0] > m.start()]
+                    if after:
+                        name = after[0][1]
+                if not name:
+                    name = last_name
+                if name:
+                    sentence_name = name
+                # 正文可能写中文（「精确率」）、表头写英文（"Precision (%)"）：
+                # 统一经别名表归一到同一指标键，跨表差值才能对上
+                scoped = metric_lines.get(_metric_name(name) or name)
+                if not _explained_by_material(tok, pool, groups, scoped):
+                    bad.append(tok)
+            last_name = sentence_name or last_name
     return bad
 
 
@@ -1666,7 +1731,17 @@ def _item_payload(index: int, item, figure_ids: list[str]) -> dict:
         payload["published"] = item.published_at.strftime("%Y-%m-%d")
     # 业界稿的正文（选中后回抓）：量子位首页只有一句摘要，没有这段写不出事实密度
     if item.extra.get("full_text"):
-        payload["full_text"] = str(item.extra["full_text"])[:3000]
+        # 指定论文给全文 6000 字：单篇精读全靠它，3000 字撑不起「问题—方法—证据」
+        limit = 6000 if item.module == "paper" else 3000
+        payload["full_text"] = str(item.extra["full_text"])[:limit]
+    if item.module == "paper" and item.extra.get("targeted"):
+        payload["targeted"] = True
+        if item.extra.get("doi"):
+            payload["doi"] = item.extra["doi"]
+        if item.extra.get("citations"):
+            payload["citations"] = item.extra["citations"]
+        if item.extra.get("publication"):
+            payload["publication"] = item.extra["publication"]
     if item.extra.get("deadline"):
         payload["deadline"] = item.extra["deadline"]
     if item.extra.get("prize"):
@@ -1812,8 +1887,13 @@ def build_user_prompt(module: str, items: list, figures: dict[str, dict], date_s
     if prompt_key == "contest_baseline" and any(
             (m.get("ntire_report") or {}) for m in material if isinstance(m, dict)):
         prompt_key = "contest_ntire"
+    prompt_text = PROMPTS[prompt_key]
+    # 指定论文名称检索成稿：追加「只写这一篇」铁律（规范全部继承，不另立门户）
+    if prompt_key == "paper" and any(
+            m.get("targeted") for m in material if isinstance(m, dict)):
+        prompt_text += TARGETED_PAPER_RULES
     return (
-        PROMPTS[prompt_key]
+        prompt_text
         + "\n\n【本期素材】\n"
         + json.dumps(payload, ensure_ascii=False, indent=2)
         + "\n\n请严格按上述 JSON 规格输出，只输出 JSON。"

@@ -6,6 +6,8 @@
     python -m scripts.demo contest       # 只生成竞赛模块
     python -m scripts.demo baseline      # 只生成「竞赛 baseline 精读」（NTIRE 报告 / Datawhale 仓库）
     python -m scripts.demo paper contest # 指定多个（可选 paper/industry/contest/baseline）
+    python -m scripts.demo paper --query "Automatic Detection and Segmentation for Group-Housed Pigs Based on PigMS R-CNN"
+                                         # 指定论文名称全网检索成稿（学术论文模块）
 
 与正式运行（scripts/run_once.py）的区别：
 - demo=True：不写库（不记 seen 指纹、不登记文章与运行日志），可反复重跑；
@@ -28,10 +30,13 @@ VARIANT_TOKENS = {"baseline": ("contest", "baseline")}
 OUT = settings.out_dir
 
 
-async def run(module: str, variant: str | None = None) -> bool:
+async def run(module: str, variant: str | None = None,
+              query: str | None = None) -> bool:
     label = f"{module}:{variant}" if variant else module
+    if query:
+        label += "·指定检索"
     print(f"[demo] ===== {label} 开始 =====")
-    result = await run_module(module, demo=True, variant=variant)
+    result = await run_module(module, demo=True, variant=variant, paper_query=query)
     stats = result.stats or {}
 
     if not result.article:
@@ -67,6 +72,13 @@ async def run(module: str, variant: str | None = None) -> bool:
 
 async def main() -> None:
     args = sys.argv[1:]
+    # --query <论文名>：指定论文检索（与 paper 模块搭配）
+    query: str | None = None
+    if "--query" in args:
+        pos = args.index("--query")
+        if pos + 1 < len(args):
+            query = args[pos + 1]
+            del args[pos:pos + 2]
     jobs: list[tuple[str, str | None]] = [(m, None) for m in args if m in VALID]
     jobs += [VARIANT_TOKENS[t] for t in args if t in VARIANT_TOKENS]
     if not jobs:
@@ -78,7 +90,7 @@ async def main() -> None:
 
     ok = True
     for m, v in jobs:
-        ok = await run(m, v) and ok
+        ok = await run(m, v, query if m == "paper" else None) and ok
 
     if not ok:
         sys.exit(1)

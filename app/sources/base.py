@@ -91,6 +91,14 @@ class HttpClient:
         except ValueError as exc:
             raise SourceError(f"{url} 返回的不是合法 JSON") from exc
 
+    async def post_json(self, url: str, **kwargs: Any) -> Any:
+        """POST 取 JSON：IEEE Xplore 的公开检索接口走这条路（无鉴权，被拦就静默降级）。"""
+        resp = await self._request("POST", url, **kwargs)
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise SourceError(f"{url} 返回的不是合法 JSON") from exc
+
     async def get_bytes(self, url: str, **kwargs: Any) -> tuple[bytes, str]:
         resp = await self._request("GET", url, **kwargs)
         ctype = resp.headers.get("content-type", "").split(";")[0].strip().lower()

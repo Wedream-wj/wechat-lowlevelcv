@@ -21,13 +21,16 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import db
-from .config import ROOT, settings, topics
+from .config import ROOT, force_utf8_stdio, settings, topics
 from .llm.client import usage
 from .llm.prompts import PROMPTS
 from .pipeline import PipelineError, push_issue, run_module
 from .scheduler import build_scheduler
 from .sources import COLLECTORS, MODULE_LABEL
 from .sources import industry
+
+# 模块导入即生效：无论 `python -m app.main` 还是 `uvicorn app.api:app` 启动都覆盖
+force_utf8_stdio()
 
 WEB_DIR = ROOT / "web"
 JOBS: dict[str, dict] = {}
@@ -113,7 +116,7 @@ async def prompt(module: str) -> dict:
 
 
 async def _run_job(job_id: str, module: str, publish: bool | None, top_n: int | None,
-                   variant: str | None = None) -> None:
+                   variant: str | None = None, query: str | None = None) -> None:
     job = JOBS[job_id]
     job.update({"status": "running", "started_at": datetime.now().isoformat()})
     # 进度与里程碑事件由 run_module 的回调实时写入，前端每 1.5s 轮询展示
@@ -134,6 +137,7 @@ async def _run_job(job_id: str, module: str, publish: bool | None, top_n: int | 
 
     try:
         result = await run_module(module, publish=publish, top_n=top_n, variant=variant,
+                                  paper_query=query if module == "paper" else None,
                                   progress=on_progress)
         if result.article:
             job.update({
@@ -169,7 +173,7 @@ async def run(module: str, request: Request, background: BackgroundTasks) -> dic
     job_id = uuid.uuid4().hex[:10]
     JOBS[job_id] = {"status": "queued", "module": module, "created_at": datetime.now().isoformat()}
     background.add_task(_run_job, job_id, module, body.get("publish"), body.get("top_n"),
-                        body.get("variant"))
+                        body.get("variant"), (str(body.get("query") or "").strip() or None))
     return {"job_id": job_id, "module": module}
 
 

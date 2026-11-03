@@ -5,7 +5,9 @@ import os
 
 import uvicorn
 
-from .config import settings
+from .config import force_utf8_stdio, settings
+
+force_utf8_stdio()
 
 
 def main() -> None:
