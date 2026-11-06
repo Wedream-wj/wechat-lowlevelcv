@@ -449,19 +449,26 @@ async def _from_github(client: HttpClient, query: str, trace: SearchTrace) -> st
 _SCIHUB_MIRRORS = ("https://www.sci-hub.ru", "https://sci-hub.se", "https://sci-hub.st")
 
 
-async def _from_sci_hub(client: HttpClient, doi: str, trace: SearchTrace) -> str:
-    """Sci-Hub 镜像：**默认禁用**。镜像分发的是未授权副本，本项目默认只在
-    开放获取 / 合法授权范围内工作；启用需在配置里显式打开并由使用者自担合规责任。"""
-    started = time.monotonic()
-    enabled = bool((topics.raw.get("academic", {}).get("paper_search", {})
-                    or {}).get("scihub_enabled", False))
-    if not enabled:
-        trace.seconds = time.monotonic() - started
-        trace.note = "已禁用（合规默认：仅开放获取/授权渠道；需显式打开 scihub_enabled）"
+def _scihub_enabled() -> bool:
+    """Sci-Hub 是否显式启用：配置缺失 / 结构残缺一律按禁用处理（合规默认）。"""
+    try:
+        cfg = topics.raw["academic"]["paper_search"]
+    except (KeyError, TypeError):
+        return False
+    return bool(cfg.get("scihub_enabled", False)) if isinstance(cfg, dict) else False
+
+
+async def scihub_pdf_url(client: HttpClient, doi: str) -> str:
+    """按 DOI 逐个试 Sci-Hub 镜像，返回页面里的 PDF 链接；没命中返回 ""。
+
+    默认禁用（academic.paper_search.scihub_enabled: false）：此时与 DOI 为空
+    一样直接返回，不发起任何网络请求。命中返回的链接已补全为绝对地址
+    （协议相对 //... 补 https:，其余相对路径按镜像地址解析）。
+    """
+    if not _scihub_enabled():
         return ""
+    doi = str(doi or "").strip()
     if not doi:
-        trace.seconds = time.monotonic() - started
-        trace.note = "没有 DOI，无法查询"
         return ""
     for mirror in _SCIHUB_MIRRORS:
         try:
@@ -477,12 +484,31 @@ async def _from_sci_hub(client: HttpClient, doi: str, trace: SearchTrace) -> str
                 url = "https:" + url
             elif not url.startswith("http"):
                 url = abs_url(mirror, url)
-            trace.seconds = time.monotonic() - started
-            trace.ok, trace.count = True, 1
             return url
-    trace.seconds = time.monotonic() - started
-    trace.note = "镜像未返回 PDF"
     return ""
+
+
+async def _from_sci_hub(client: HttpClient, doi: str, trace: SearchTrace) -> str:
+    """Sci-Hub 镜像：**默认禁用**。镜像分发的是未授权副本，本项目默认只在
+    开放获取 / 合法授权范围内工作；启用需在配置里显式打开并由使用者自担合规责任。
+
+    解析逻辑全部委托给 scihub_pdf_url，这里只负责 trace 记账。"""
+    started = time.monotonic()
+    if not _scihub_enabled():
+        trace.seconds = time.monotonic() - started
+        trace.note = "已禁用（合规默认：仅开放获取/授权渠道；需显式打开 scihub_enabled）"
+        return ""
+    if not doi:
+        trace.seconds = time.monotonic() - started
+        trace.note = "没有 DOI，无法查询"
+        return ""
+    url = await scihub_pdf_url(client, doi)
+    trace.seconds = time.monotonic() - started
+    if url:
+        trace.ok, trace.count = True, 1
+    else:
+        trace.note = "镜像未返回 PDF"
+    return url
 
 
 # ---------------------------------------------------------------- 汇总

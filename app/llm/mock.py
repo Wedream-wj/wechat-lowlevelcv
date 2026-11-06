@@ -12,6 +12,7 @@ from datetime import date
 
 from ..config import topics
 from ..models import Item
+from ..spec_tools import venue_card_label, venue_short_label
 from .title_audit import compose_contest_title
 
 
@@ -306,10 +307,10 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
         arch_fid, res_fid = (fids + ["", ""])[:2]
 
         sections: list[dict] = [
-            {"type": "meta_card", "rows": [
-                ["论文标题", main.extra.get("title_zh") or main.title],
-                ["期刊/会议", main.venue or "arXiv"],
-                ["作者团队", ", ".join(main.authors[:6]) or "以论文首页为准"],
+            {"type": "meta_card", "label": "PAPER INFO", "rows": [
+                ["论文名称", main.title],
+                ["发表期刊/会议", venue_card_label(main.venue, main.year or "") or "arXiv"],
+                ["作者团队", "、".join(main.authors[:6]) or "以论文首页为准"],
                 ["开源代码", main.code_url or "暂未开源"],
             ]},
             {"type": "h2", "text": "01 | 研究背景与痛点"},
@@ -357,8 +358,10 @@ def mock_spec(module: str, items: list[Item], figures: dict[str, dict],
         if len(items) > 1:
             sections += [{"type": "h2", "text": "05 | 顺带值得一看"},
                          {"type": "bullets", "items": [f"{i.title}（{i.venue or 'arXiv'}）" for i in items[1:3]]}]
+        venue_label = venue_short_label(main.venue, main.year or "")
         return {
-            "title": f"{short_title}｜论文速览",
+            "title": (f"{venue_label} | {short_title}" if venue_label
+                      else f"{short_title}｜论文速览"),
             "subtitle": f"{main.venue or 'arXiv'} · {main.category or '底层视觉'}",
             "digest": (main.summary or "")[:100],
             "lead": [f"今天看一篇 {main.venue or 'arXiv'} 的工作：{main.title}。",

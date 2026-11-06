@@ -8,6 +8,9 @@
     python -m scripts.demo paper contest # 指定多个（可选 paper/industry/contest/baseline）
     python -m scripts.demo paper --query "Automatic Detection and Segmentation for Group-Housed Pigs Based on PigMS R-CNN"
                                          # 指定论文名称全网检索成稿（学术论文模块）
+    python -m scripts.demo paper --pdf "C:\\path\\to\\paper.pdf"
+                                         # 指定本地 PDF：先高精解析文件本身，
+                                         # 再按标题/DOI 全网补全图床大图与代码仓
 
 与正式运行（scripts/run_once.py）的区别：
 - demo=True：不写库（不记 seen 指纹、不登记文章与运行日志），可反复重跑；
@@ -31,12 +34,15 @@ OUT = settings.out_dir
 
 
 async def run(module: str, variant: str | None = None,
-              query: str | None = None) -> bool:
+              query: str | None = None, pdf: str | None = None) -> bool:
     label = f"{module}:{variant}" if variant else module
-    if query:
+    if pdf:
+        label += "·本地 PDF"
+    elif query:
         label += "·指定检索"
     print(f"[demo] ===== {label} 开始 =====")
-    result = await run_module(module, demo=True, variant=variant, paper_query=query)
+    result = await run_module(module, demo=True, variant=variant,
+                              paper_query=query, paper_path=pdf)
     stats = result.stats or {}
 
     if not result.article:
@@ -72,15 +78,23 @@ async def run(module: str, variant: str | None = None,
 
 async def main() -> None:
     args = sys.argv[1:]
-    # --query <论文名>：指定论文检索（与 paper 模块搭配）
+    # --query <论文名>：指定论文检索；--pdf <路径>：本地 PDF 高精解析（均配 paper 模块）
     query: str | None = None
-    if "--query" in args:
-        pos = args.index("--query")
-        if pos + 1 < len(args):
-            query = args[pos + 1]
+    pdf: str | None = None
+    for flag, key in (("--query", "query"), ("--pdf", "pdf")):
+        if flag in args:
+            pos = args.index(flag)
+            if pos + 1 < len(args):
+                if key == "query":
+                    query = args[pos + 1]
+                else:
+                    pdf = args[pos + 1]
             del args[pos:pos + 2]
     jobs: list[tuple[str, str | None]] = [(m, None) for m in args if m in VALID]
     jobs += [VARIANT_TOKENS[t] for t in args if t in VARIANT_TOKENS]
+    if pdf and not any(m == "paper" for m, _ in jobs):
+        # 指定本地 PDF 时只跑论文模块：路径只对 paper 有意义
+        jobs = [("paper", None)]
     if not jobs:
         jobs = [("paper", None), ("contest", None)]
     bad = [a for a in args if a not in VALID and a not in VARIANT_TOKENS]
@@ -90,7 +104,8 @@ async def main() -> None:
 
     ok = True
     for m, v in jobs:
-        ok = await run(m, v, query if m == "paper" else None) and ok
+        ok = await run(m, v, query if m == "paper" else None,
+                       pdf if m == "paper" else None) and ok
 
     if not ok:
         sys.exit(1)

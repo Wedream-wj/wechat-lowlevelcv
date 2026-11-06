@@ -15,7 +15,13 @@ from __future__ import annotations
 import re
 
 from ..config import topics
-from ..spec_tools import MAX_TABLE_COLS, compact_tables
+from ..spec_tools import (
+    MAX_TABLE_COLS,
+    abbrev_title_venue,
+    compact_tables,
+    venue_abbrev,
+    venue_short_label,
+)
 
 BRAND = topics.raw.get("brand", {})
 BRAND_NAME = BRAND.get("name", "底层视觉论文笔记")
@@ -97,6 +103,9 @@ SYSTEM = f"""你是公众号「{BRAND_NAME}」的主笔，长期跟踪底层视�
   也**不要**写「论文未披露」之类的说明——直接不提这一项。
 - 素材里给了实验表格或带数字的结论句时，正文必须引用其中至少 3 个具体数字并写出比较（谁比谁高多少）；
   禁止用「素材未提供具体数值」「无法量化」这类说明搪塞——先把手上的数字用完。
+- 比较方向必须与数字一致：「领先/优于」只能用于本方数值更高时，「落后/低于」只能用于本方数值更低时，
+  并给出差值。凡出现「领先 X」而 X 实际更低（或「低于基线」而数字反而更高）的句子，一律视为事实错误；
+  同一段内不得同时出现方向相反的判断。
 - 不得编造作者单位、开源地址、成绩排名。
 - 不得引用素材之外的图片 URL。需要配图时只引用给定的 F 编号。
 - 输出必须是合法 JSON，不要 Markdown 代码块包裹，不要任何解释性文字。
@@ -132,7 +141,9 @@ SPEC_GUIDE = """
 {"type":"numbered", "items":["步骤 1","步骤 2"]}
 {"type":"quote", "text":"原文引用 / 作者观点，注明出处"}
 {"type":"highlight", "title":"核心结论", "text":"一句话高亮，整篇不超过 2 个"}
-{"type":"meta_card", "label":"PAPER INFO", "rows":[["论文标题","..."],["期刊/会议","..."],["作者团队","..."],["研究机构","..."],["开源代码","..."]]}
+{"type":"meta_card", "label":"PAPER INFO", "rows":[["论文名称","英文原标题照抄"],["发表期刊/会议","Pattern Recognition 2026（PR）"],["作者团队","A、B、C 等人"],["研究机构","..."],["开源代码","..."]]}
+// 论文稿这三行必选（论文名称 / 发表期刊/会议 / 作者团队），紧跟导语、放在第一个 h2 之前；
+// 作者只能写「由 A、B 等人组成」，禁止「作者团队来自 [人名]」
 // 业界产业事件卡（label 写 INDUSTRY SNAPSHOT）：主体与事件并成一行，不设规模/金额行
 {"type":"meta_card", "label":"INDUSTRY SNAPSHOT", "rows":[["事件","Runway 开源世界动作模型 Praxis-1"],["时间","2026-10-26 发布，数月内开放权重"],["影响面","机器人策略训练与评测"]]}
 // 赛题精读卡（label 写 COMPETITION INFO）：讲赛题本身
@@ -217,14 +228,27 @@ PAPER_PROMPT = """
 
 【结构建议】
 1. 导语（lead，2 段）：第一段用一个具体场景/矛盾把读者拉进来；第二段交代这篇论文干了什么、为什么值得读。
-2. meta_card：论文信息卡（标题、会议/期刊、作者团队、研究机构、开源代码）。信息不全的行直接省略。
+2. meta_card（**必写，不得省略**）：紧跟导语、放在第一个 h2 之前，label 写 `PAPER INFO`。
+   三行必选项缺一不可：`论文名称`（论文英文原标题照抄）、`发表期刊/会议`（全称 + 简称，
+   如「Pattern Recognition 2026（PR）」）、`作者团队`（固定写「由 A、B、C 等研究人员共同完成」，
+  人名用「、」连接，超过 6 人只列前 6 位）；
+   素材给出的「研究机构」「开源代码」再各补一行，素材没给的项整行省略，**不得**写
+   「官方未公布 / 未披露 / 暂无」占位。作者表述语法铁律：只能在「作者团队由
+   Weihang Kong、Jienan Shen、He Li、Yang Li 等人组成」或「本文由 Weihang Kong 等研究人员
+   共同完成」两种写法里选，**绝对禁止**「作者团队来自 [人名列表]」——「来自」后面只能接
+   机构（如「研究团队来自西北工业大学」）。
 3. h2 "01 | 研究背景与痛点"：讲清任务背景与已有方法的具体死结（卡在哪个环节、为什么走不通），
    不要泛泛说「效果不好」。能点名被挑战的 SOTA 方法更好。
 4. h2 "02 | 核心创新与方法拆解"：核心。先用一段话讲整体思路，再按模块拆（h3 + p / bullets）。
-   必须引用架构图（figure，ref 用素材提供的编号，图注写「图 X：…」）。
+   **图文混排铁律：本节必须插入至少一个 figure 块**（整体架构 / 网络 Pipeline / 方法原理框图），
+   ref 只能用素材 figures 里给出的编号（F1、F2…，严禁自造），图注写「图 X：整体架构。…」，
+   正文再点明图中哪一部分对应哪个模块，严禁通篇纯文字让读者凭空想象结构。
    每个模块要说清「为什么这么设计、替代了已有方法的哪个组件」，而不只是「是什么」。
 5. h2 "03 | 关键实验结果解读"：这是全文证据段，必须有硬数字。
-   素材 tables 是从论文 HTML 直接抽出的实验对比表，数字可信：**至少用 table 块原样呈现 1 张**
+   **表格化铁律：本节必须用 table 块原样呈现 1 张核心对比表**，方法列同时覆盖
+   Baseline、最先进的方法与本文方法（Ours），关键指标逐列对照，让读者一眼看出领先幅度；
+   绝不允许把对比数据只散落在段落里。
+   素材 tables 是从论文 HTML 直接抽出的实验对比表，数字可信，至少引用其中一张
    （必须裁到 5 列以内：方法名 + 4 个核心指标，数字照抄、不得改写），表格前后各写一段解读：
    提升集中在哪些指标、比最先进的方法高/低多少（写成「PSNR 高 0.42 dB」「LPIPS 低 0.019」这样的差值，
    差值必须拿表里两个数逐位现算），
@@ -269,8 +293,14 @@ PAPER_PROMPT = """
 
 【标题生成规则（发表信誉度 + 动机/原理驱动）】
 **第一条：发表状态以素材 publication 字段为准（系统已联网查证），标题信誉度硬约束：**
-- publication.accepted=true：标题 venue 前缀必须用 publication.venue 的会议/期刊名
-  （如「CVPR 2026」「TIP 2025」），信息卡的「期刊/会议」行同样更正，不得再写 arXiv；
+- publication.accepted=true：标题 venue 前缀必须用 publication.venue 查证到的会议/期刊，且
+  **一律写国际学术圈通用简称**：`Pattern Recognition` → **PR**、`Knowledge-Based Systems` → **KBS**、
+  `IEEE TPAMI` → **TPAMI**、`IEEE TIP` → **TIP**、`IJCV` → **IJCV**；CVPR / ICCV / ECCV / NeurIPS / ICML
+  本身就是标准简称，保持原样。格式固定为「简称 + 年份 + | + 标题」，示例：
+  `PR 2026 | WeaCount：空间感知解耦，攻克恶劣天气人群计数`。
+  标题里**严禁**出现期刊全称（「Pattern Recognition 2026｜…」「Pattern Recognition (PR) 2026｜…」
+  一律不合格）；信息卡的「发表期刊/会议」行写全称并附简称（如「Pattern Recognition 2026（PR）」），
+  不得再写 arXiv；
 - publication.accepted=false（检索确认纯预印本）或没有 publication 字段时：
   标题**严禁出现 "arXiv" 字样**（正文仍可提及 arXiv 预印本），venue 要素整体省略；
 - 未经过同行评议的预印本不打 arXiv 标签是本号铁律，无论模型多想写都不得违反。
@@ -798,8 +828,12 @@ TARGETED_PAPER_RULES = """
 2. 素材来自论文全文（开放获取 XML / PDF）：tables 是论文原表、result_snippets 是
    论文原句、figure 图注是论文原图注——数字与结论逐字取用，一个都不许改写或外推。
 3. 素材的 doi / citations / venue / authors 字段已由学术数据库（Crossref / OpenAlex /
-   Europe PMC）核实，信息卡按此填写，不得增删作者或更改期刊名。
-4. 元叙述沿用全局禁令：「经检索」「素材来自」「网络显示」等交代检索过程的句子一律禁止。
+   Europe PMC）核实，信息卡按此填写，不得增删作者或更改期刊名；信息卡三行
+   （论文名称 / 发表期刊/会议 / 作者团队）必须齐全，作者只能写「由 A、B 等人组成」，
+   期刊/会议行写全称 + 简称（如「Pattern Recognition 2026（PR）」）。
+4. 标题 venue 只写国际通用简称（Pattern Recognition → PR、Knowledge-Based Systems → KBS），
+   期刊/会议全称只允许出现在信息卡里。
+5. 元叙述沿用全局禁令：「经检索」「素材来自」「网络显示」等交代检索过程的句子一律禁止。
 """
 
 MODULE_TITLE = {"paper": "论文精读", "industry": "业界观察", "contest": "赛事速递"}
@@ -1162,7 +1196,7 @@ SUMMARY_FOCUS_RETRY = (
 
 
 def enforce_title_rules(spec: dict, module: str, items: list | None = None) -> bool:
-    """论文标题信誉度硬约束：标题严禁出现 arXiv 字样 + venue 必须与查证结论一致。
+    """论文标题信誉度硬约束：标题严禁出现 arXiv 字样 + venue 用国际通用简称并与查证结论一致。
 
     规则依据：纯预印本未经同行评议，标题打 arXiv 标签会拉低权威感；已正式收录的
     论文，venue 以发表状态查证（publication 字段）为准——模型偶尔写错或编造
@@ -1181,19 +1215,30 @@ def enforce_title_rules(spec: dict, module: str, items: list | None = None) -> b
             title = spec["title"] = cleaned
             changed = True
 
-    # 2) venue 对齐查证结论：先定位标题实际写的是哪篇（头条不一定 selected[0]——
+    # 2) 期刊/会议一律用国际通用简称：标题写给学术圈看，「Pattern Recognition 2026｜…」
+    #    既冗长又不像行内人写的，必须先规范成「PR 2026 | …」。
+    if module == "paper":
+        abbrev = abbrev_title_venue(title)
+        if abbrev and abbrev != title:
+            title = spec["title"] = abbrev
+            changed = True
+
+    # 3) venue 对齐查证结论：先定位标题实际写的是哪篇（头条不一定 selected[0]——
     #    模型按素材价值自选头条），再拿那篇的查证结论强制对齐。
     if module == "paper" and items:
         featured = _featured_item(title, items)
         pub = (featured.extra.get("publication") or {}) if featured else {}
         venue = str(pub.get("venue") or "")
-        short = venue.split()[0] if venue else ""
-        if pub.get("accepted") and venue and short not in title:
-            # 已正式收录：剥掉开头错误/编造的 venue 标签，换上查证过的名称
+        label = venue_short_label(venue, getattr(featured, "year", "") or "") if venue else ""
+        token = label.split()[0] if label else ""
+        present = bool(token) and re.search(
+            rf"(?<![A-Za-z]){re.escape(token)}(?![A-Za-z])", title) is not None
+        if pub.get("accepted") and label and not present:
+            # 已正式收录：剥掉开头错误/编造的 venue 标签，换上查证过的简称
             stripped = re.sub(
                 r"^\s*(?:【[^】]{0,24}】|[A-Za-z][A-Za-z/ &]{0,20}\s*20\d{2}\s*[|｜：:]?\s*)",
                 "", title)
-            spec["title"] = f"{venue} | {stripped}"
+            spec["title"] = f"{label} | {stripped}"
             changed = True
         elif pub.get("accepted") is False:
             # 检索确认仅预印本：标题里的任何 venue 前缀都是编造的（模型给预印本

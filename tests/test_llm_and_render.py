@@ -547,3 +547,38 @@ class TestSummaryMutex(unittest.TestCase):
         ]}
         self.assertFalse(drop_redundant_summary(spec))
         self.assertEqual(len(spec["sections"]), 2)
+
+
+class TestPaperTitleVenueAbbrev(unittest.TestCase):
+    """论文标题必须用国际通用简称（PR/KBS/TPAMI），且分隔符统一为「 | 」。"""
+
+    def test_full_venue_is_abbreviated(self):
+        from app.llm.prompts import enforce_title_rules
+
+        spec = {"title": "Pattern Recognition 2026｜WeaCount：空间感知解耦，攻克恶劣天气人群计数"}
+        self.assertTrue(enforce_title_rules(spec, "paper"))
+        self.assertEqual(spec["title"],
+                         "PR 2026 | WeaCount：空间感知解耦，攻克恶劣天气人群计数")
+
+    def test_other_known_venues(self):
+        from app.llm.prompts import enforce_title_rules
+
+        for raw, expected in (
+            ("Knowledge-Based Systems 2025 | XXX", "KBS 2025 | XXX"),
+            ("IEEE Transactions on Pattern Analysis and Machine Intelligence 2024｜YYY",
+             "TPAMI 2024 | YYY"),
+        ):
+            spec = {"title": raw}
+            self.assertTrue(enforce_title_rules(spec, "paper"))
+            self.assertEqual(spec["title"], expected)
+
+    def test_untouched_when_not_paper_or_no_venue(self):
+        from app.llm.prompts import enforce_title_rules
+
+        spec = {"title": "Pattern Recognition 2026｜WeaCount"}
+        self.assertFalse(enforce_title_rules(spec, "industry"))
+        self.assertEqual(spec["title"], "Pattern Recognition 2026｜WeaCount")
+
+        spec = {"title": "无惧复杂失真！XXX 让低光增强一次到位"}
+        self.assertFalse(enforce_title_rules(spec, "paper"))
+        self.assertEqual(spec["title"], "无惧复杂失真！XXX 让低光增强一次到位")

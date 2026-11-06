@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import unittest
 
 from app.models import Item
@@ -82,7 +83,8 @@ class TestMergeAndRank(unittest.TestCase):
         self.assertEqual(item.code_url, "https://github.com/a/b")
 
 
-JATS = """<article><front><abstract><p>Instance segmentation of pigs is critical.</p></abstract></front>
+JATS = """<article xmlns:xlink="http://www.w3.org/1999/xlink">
+<front><abstract><p>Instance segmentation of pigs is critical.</p></abstract></front>
 <body>
 <sec><label>4</label><title>Results</title>
 <p>The MS R-CNN framework with traditional NMS obtains an F1 of 0.9228 on 130 images.</p>
@@ -98,7 +100,7 @@ JATS = """<article><front><abstract><p>Instance segmentation of pigs is critical
 <table><thead><tr><th rowspan="2">Method</th><th colspan="3">0</th><th colspan="3">0.5</th></tr>
 <tr><th>R</th><th>P</th><th>F1</th><th>R</th><th>P</th><th>F1</th></tr></thead>
 <tbody><tr><td>MS R-CNN</td><td>94.68%</td><td>86.33%</td><td>0.9031</td><td>93.27%</td><td>90.19%</td><td>0.9170</td></tr></tbody></table></table-wrap>
-<fig id="f1"><label>Figure 2</label><caption><p>Flowchart of the detection and segmentation algorithm based on PigMS R-CNN.</p></caption></fig>
+<fig id="f1"><label>Figure 2</label><caption><p>Flowchart of the detection and segmentation algorithm based on PigMS R-CNN.</p></caption><graphic xlink:href="sensors-21-03251-g002.jpg"/></fig>
 </floats-group></article>"""
 
 
@@ -130,11 +132,67 @@ class TestJatsAssets(unittest.TestCase):
         self.assertIn(2, self.assets["fig_captions"])
         self.assertIn("Flowchart", self.assets["fig_captions"][2])
 
+    def test_figures_carry_graphic_href(self):
+        figs = self.assets["figures"]
+        self.assertEqual(len(figs), 1)
+        self.assertEqual(figs[0]["number"], 2)
+        self.assertEqual(figs[0]["href"], "sensors-21-03251-g002.jpg")
+
     def test_full_text_extracts_paragraphs(self):
         self.assertIn("F1 of 0.9374", self.assets["full_text"])
 
     def test_bad_xml_returns_empty(self):
         self.assertEqual(pp.jats_assets("<not-xml"), {})
+
+
+class TestJatsArchFigure(unittest.TestCase):
+    """规则 3 的爬虫兜底：OA 全文里的架构图要能落到本地，供「核心创新」节插图。"""
+
+    class _Client:
+        def __init__(self, ok: bool = True):
+            self.ok = ok
+            self.urls: list[tuple[str, str]] = []
+
+        async def download_image(self, url: str, referer: str = "", timeout: float = 15.0) -> str:
+            self.urls.append((url, referer))
+            return "out/assets/arch.jpg" if self.ok else ""
+
+    def setUp(self):
+        self.assets = pp.jats_assets(JATS)
+        self.item = Item(module="paper", source="paper_pdf", url="https://doi.org/10.3390/s21093251",
+                         title="PigMS R-CNN")
+
+    def test_arch_figure_downloaded_from_pmc_bin(self):
+        client = self._Client()
+        path, caption, role = asyncio.run(
+            pp._jats_arch_figure(client, self.assets["figures"], "PMC8125813", self.item))
+        self.assertEqual(role, "arch")
+        self.assertTrue(path)
+        self.assertIn("Flowchart", caption)
+        self.assertEqual(
+            client.urls[0][0],
+            "https://pmc.ncbi.nlm.nih.gov/articles/instance/8125813/bin/"
+            "sensors-21-03251-g002.jpg")
+
+    def test_non_arch_caption_is_not_used(self):
+        client = self._Client()
+        figs = [{"number": 1, "caption": "Top view image of the pen.", "href": "g001.jpg"}]
+        self.assertEqual(
+            asyncio.run(pp._jats_arch_figure(client, figs, "PMC8125813", self.item)),
+            ("", "", ""))
+        self.assertEqual(client.urls, [])
+
+    def test_missing_pmcid_or_download_failure_returns_empty(self):
+        client = self._Client()
+        self.assertEqual(
+            asyncio.run(pp._jats_arch_figure(client, self.assets["figures"], "", self.item)),
+            ("", "", ""))
+        failing = self._Client(ok=False)
+        self.assertEqual(
+            asyncio.run(pp._jats_arch_figure(
+                failing, self.assets["figures"], "PMC8125813", self.item)),
+            ("", "", ""))
+        self.assertTrue(failing.urls)
 
 
 class TestPlausibleGrid(unittest.TestCase):

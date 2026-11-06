@@ -12,18 +12,28 @@ from app.render import wechat
 from app.render.markdown import spec_to_markdown
 from app.spec_tools import (
     MAX_TABLE_COLS,
+    abbrev_title_venue,
     compact_table,
+    ensure_paper_arch_figure,
+    ensure_paper_meta_card,
+    ensure_paper_result_table,
     merge_event_rows,
     normalize_meta_cards,
     normalize_section_titles,
     normalize_wording,
     normalized_spec,
     prune_spec_tables,
+    recast_author_origin,
     renumber_sections,
+    scrub_dangling_figures,
+    scrub_paper_author_grammar,
     scrub_process_narration,
     scrub_reader_burden,
     strip_countdown_title,
     strip_meta_time,
+    venue_abbrev,
+    venue_card_label,
+    venue_short_label,
 )
 
 
@@ -408,6 +418,205 @@ class TestTableCompaction(unittest.TestCase):
         out = wechat.table(["方法", "PSNR", "SSIM"], [["Ours", "32.1", "0.95", "多余列"]])
         self.assertEqual(out.count("<td "), 3)
         self.assertNotIn("多余列", out)
+
+
+def _paper_item(**kw) -> Item:
+    base = dict(
+        module="paper",
+        title="WeaCount: Spatial-Aware Decoupling for Crowd Counting in Adverse Weather",
+        url="https://doi.org/10.1016/j.patcog.2026.115188",
+        source="Crossref",
+        venue="Pattern Recognition",
+        year="2026",
+        authors=["Weihang Kong", "Jienan Shen", "He Li", "Yang Li"],
+    )
+    base.update(kw)
+    return Item(**base)
+
+
+class TestVenueAbbreviation(unittest.TestCase):
+    def test_full_names_collapse_to_standard_abbrev(self):
+        self.assertEqual(venue_abbrev("Pattern Recognition"), "PR")
+        self.assertEqual(venue_abbrev("Knowledge-Based Systems"), "KBS")
+        self.assertEqual(
+            venue_abbrev("IEEE Transactions on Pattern Analysis and Machine Intelligence"),
+            "TPAMI")
+
+    def test_longer_journal_wins_over_its_prefix(self):
+        # PRL 必须先于 PR 命中，否则会产出 "PRL" 被截成 "PR" 的错误简称
+        self.assertEqual(venue_abbrev("Pattern Recognition Letters"), "PRL")
+
+    def test_already_short_and_unknown_venues(self):
+        self.assertEqual(venue_abbrev("CVPR"), "CVPR")
+        self.assertEqual(venue_abbrev("arXiv"), "")
+
+    def test_short_label_and_card_label(self):
+        self.assertEqual(venue_short_label("Pattern Recognition", "2026"), "PR 2026")
+        self.assertEqual(venue_short_label("Pattern Recognition 2026"), "PR 2026")
+        self.assertEqual(venue_card_label("Pattern Recognition 2026"),
+                         "Pattern Recognition 2026（PR）")
+
+    def test_title_uses_abbrev_and_normalizes_separator(self):
+        self.assertEqual(
+            abbrev_title_venue("Pattern Recognition 2026｜WeaCount：空间感知解耦，攻克恶劣天气人群计数"),
+            "PR 2026 | WeaCount：空间感知解耦，攻克恶劣天气人群计数")
+        self.assertEqual(abbrev_title_venue("Pattern Recognition (PR) 2026｜WeaCount：空间感知解耦"),
+                         "PR 2026 | WeaCount：空间感知解耦")
+        self.assertEqual(abbrev_title_venue("Knowledge-Based Systems 2025 | XXX"),
+                         "KBS 2025 | XXX")
+        self.assertEqual(
+            abbrev_title_venue(
+                "IEEE Transactions on Pattern Analysis and Machine Intelligence 2024｜YYY"),
+            "TPAMI 2024 | YYY")
+
+    def test_title_without_venue_untouched(self):
+        title = "无惧复杂失真！XXX 让低光增强一次到位"
+        self.assertEqual(abbrev_title_venue(title), title)
+
+
+class TestAuthorGrammar(unittest.TestCase):
+    def test_name_list_after_origin_is_recast(self):
+        sent = ("论文发表在 Pattern Recognition 2026，作者团队来自 "
+                "Weihang Kong、Jienan Shen、He Li、Yang Li。")
+        out = recast_author_origin(sent)
+        self.assertIn("作者团队由 Weihang Kong、Jienan Shen、He Li、Yang Li 等人组成", out)
+        self.assertNotIn("来自 Weihang", out)
+
+    def test_affiliation_after_origin_is_kept(self):
+        sent = "研究团队来自清华大学电子工程系。"
+        self.assertEqual(recast_author_origin(sent), sent)
+
+    def test_scrub_covers_lead_and_sections(self):
+        spec = {"lead": ["作者团队来自 Weihang Kong、Jienan Shen。"],
+                "sections": [{"type": "p", "text": "本文作者来自 He Li、Yang Li。"}]}
+        self.assertGreaterEqual(scrub_paper_author_grammar(spec), 2)
+        self.assertIn("由 Weihang Kong、Jienan Shen 等人组成", spec["lead"][0])
+        self.assertIn("由 He Li、Yang Li 等人组成", spec["sections"][0]["text"])
+
+
+class TestPaperMetaCard(unittest.TestCase):
+    def test_card_inserted_with_three_required_rows(self):
+        item = _paper_item()
+        spec = {"title": "PR 2026 | WeaCount", "sections": [
+            {"type": "h2", "text": "01 | 研究背景与痛点"},
+            {"type": "p", "text": "正文"},
+        ]}
+        self.assertEqual(ensure_paper_meta_card(spec, item), 1)
+        card = spec["sections"][0]
+        self.assertEqual(card["type"], "meta_card")
+        self.assertEqual(card["label"], "PAPER INFO")
+        labels = [r[0] for r in card["rows"]]
+        self.assertEqual(labels[:3], ["论文名称", "发表期刊/会议", "作者团队"])
+        self.assertEqual(card["rows"][0][1], item.title)
+        self.assertIn("PR", card["rows"][1][1])
+        authors = card["rows"][2][1]
+        self.assertIn("Weihang Kong", authors)
+        self.assertIn("、", authors)
+        self.assertNotIn("来自", authors)
+
+    def test_existing_card_rows_are_renamed_and_promoted(self):
+        item = _paper_item()
+        spec = {"title": "T", "sections": [
+            {"type": "meta_card", "rows": [
+                ["开源代码", "https://github.com/x/y"],
+                ["论文标题", "旧标题"],
+                ["期刊/会议", "Pattern Recognition 2026"],
+            ]},
+            {"type": "h2", "text": "01 | 背景"},
+        ]}
+        self.assertGreaterEqual(ensure_paper_meta_card(spec, item), 1)
+        rows = spec["sections"][0]["rows"]
+        self.assertEqual([r[0] for r in rows][:3],
+                         ["论文名称", "发表期刊/会议", "作者团队"])
+        self.assertEqual(rows[0][1], item.title)
+
+    def test_no_item_is_noop(self):
+        spec = {"title": "T", "sections": [{"type": "h2", "text": "01 | 背景"}]}
+        self.assertEqual(ensure_paper_meta_card(spec, None), 0)
+
+    def test_placeholder_rows_are_dropped(self):
+        item = _paper_item()
+        spec = {"title": "T", "sections": [
+            {"type": "meta_card", "label": "PAPER INFO", "rows": [
+                ["论文名称", item.title],
+                ["研究机构", "官方未公布"],
+                ["开源代码", "未披露"],
+            ]},
+            {"type": "h2", "text": "01 | 背景"},
+        ]}
+        ensure_paper_meta_card(spec, item)
+        labels = [r[0] for r in spec["sections"][0]["rows"]]
+        self.assertNotIn("研究机构", labels)
+        self.assertNotIn("开源代码", labels)
+
+
+class TestPaperFigureAndTable(unittest.TestCase):
+    def _spec(self) -> dict:
+        return {"title": "PR 2026 | WeaCount", "sections": [
+            {"type": "h2", "text": "02 | 核心创新与方法拆解"},
+            {"type": "p", "text": "方法正文"},
+            {"type": "h2", "text": "03 | 关键实验结果解读"},
+            {"type": "p", "text": "结果正文"},
+        ]}
+
+    def test_arch_figure_inserted_after_first_paragraph(self):
+        item = _paper_item()
+        figures = {"F1": {"item_id": f"paper:{item.fingerprint}",
+                          "caption": "Overall architecture of WeaCount"}}
+        spec = self._spec()
+        self.assertEqual(ensure_paper_arch_figure(spec, item, figures), 1)
+        fig = spec["sections"][2]
+        self.assertEqual((fig["type"], fig["ref"]), ("figure", "F1"))
+        self.assertTrue(fig["caption"].startswith("图 1："))
+
+    def test_arch_figure_skipped_when_present_or_missing(self):
+        item = _paper_item()
+        figures = {"F1": {"item_id": f"paper:{item.fingerprint}", "caption": "Overall architecture"}}
+        spec = {"sections": [
+            {"type": "h2", "text": "02 | 核心创新与方法拆解"},
+            {"type": "figure", "ref": "F1", "caption": "图 1：整体架构。"},
+        ]}
+        self.assertEqual(ensure_paper_arch_figure(spec, item, figures), 0)
+        self.assertEqual(ensure_paper_arch_figure(self._spec(), item, {}), 0)
+
+    def test_result_table_inserted_from_material(self):
+        item = _paper_item(extra={"tables": [{
+            "caption": "Table 1: Comparison with SOTA",
+            "header": ["Method", "MAE", "MSE"],
+            "rows": [["Baseline", "9.4", "15.6"], ["Ours", "8.1", "12.3"]],
+        }]})
+        spec = self._spec()
+        self.assertEqual(ensure_paper_result_table(spec, item), 1)
+        table = spec["sections"][-1]
+        self.assertEqual(table["type"], "table")
+        self.assertEqual(table["header"], ["Method", "MAE", "MSE"])
+        self.assertEqual(table["rows"][-1][0], "Ours")
+
+    def test_result_table_skipped_without_material(self):
+        item = _paper_item()
+        self.assertEqual(ensure_paper_result_table(self._spec(), item), 0)
+
+    def test_dangling_figure_dropped_and_replaced(self):
+        item = _paper_item()
+        spec = {"sections": [
+            {"type": "h2", "text": "02 | 核心创新与方法拆解"},
+            {"type": "figure", "ref": "Fig.1", "caption": "图 1：模型架构。"},
+            {"type": "p", "text": "方法正文"},
+        ]}
+        self.assertEqual(scrub_dangling_figures(spec, {}), 1)
+        self.assertFalse([b for b in spec["sections"] if b.get("type") == "figure"])
+
+        figures = {"F1": {"item_id": f"paper:{item.fingerprint}",
+                          "caption": "Overall architecture of WeaCount"}}
+        spec = {"sections": [
+            {"type": "h2", "text": "02 | 核心创新与方法拆解"},
+            {"type": "figure", "ref": "Fig.1", "caption": "图 1：模型架构。"},
+            {"type": "p", "text": "方法正文"},
+        ]}
+        self.assertEqual(scrub_dangling_figures(spec, figures), 1)
+        self.assertEqual(ensure_paper_arch_figure(spec, item, figures), 1)
+        refs = [b["ref"] for b in spec["sections"] if b.get("type") == "figure"]
+        self.assertEqual(refs, ["F1"])
 
 
 if __name__ == "__main__":

@@ -190,6 +190,20 @@ _ACADEMIC_WORDING_FIXES: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"最强对手"), "最先进的方法"),
     (re.compile(r"一起给"), "一同提出"),
     (re.compile(r"讨巧"), "设计得颇为经济"),
+    (re.compile(r"预处理后处理"), "预处理与后处理"),
+    (re.compile(r"白捡的"), "无需额外开销的"),
+    (re.compile(r"白捡"), "额外获得"),
+    (re.compile(r"配角"), "附属环节"),
+    (re.compile(r"[「“\"]教练[」”\"]"), "「辅助监督信号」"),
+    (re.compile(r"[「“\"]教师[」”\"]"), "「辅助监督信号」"),
+    (re.compile(r"死结"), "关键瓶颈"),
+    (re.compile(r"性价比极高"), "综合收益显著"),
+    (re.compile(r"最吸引人"), "最值得关注"),
+    (re.compile(r"惊人"), "显著"),
+    (re.compile(r"将表格数字翻译成结论"), "将表中结果归纳如下"),
+    (re.compile(r"(?<!-)TITS(?![A-Za-z0-9-])"), "T-ITS"),
+    (re.compile(r"\s*deepest\s+feature\s+map\s*", re.I), "最深层特征图"),
+    (re.compile(r"[「“\"]免费[」”\"]"), "零成本"),
 )
 
 _WORDING_FIXES: tuple[tuple[re.Pattern, str], ...] = (
@@ -245,7 +259,8 @@ _PROCESS_NARRATION_RE = re.compile(
     r"行列对齐|原值呈现|不做重排|重新对齐|素材表格|"
     r"表格[^。！？]{0,12}(?:错位|失真|杂乱|不齐|参差)|"
     r"(?:抓取|解析|抽取)[^。！？]{0,6}(?:限制|受限|失败|异常|错位|偏差)|"
-    r"素材(?:有限|不足|缺失|不全)"
+    r"素材(?:有限|不足|缺失|不全)|"
+    r"素材(?:中|里)?[^。！？]{0,8}(?:未给出|未提供|未披露|未列出|未找到|没有给出|没有提供)"
 )
 
 
@@ -906,6 +921,416 @@ def normalize_meta_cards(spec: dict, module: str) -> int:
             block["rows"] = new_rows
             changed += 1
     return changed
+
+
+# ------------------------------------------------------------------ 期刊/会议简称
+# 标题里写期刊全称既冗长又不像学术圈内部说话：国际通用做法是直接写简称。
+# 全称留给信息卡（可检索、可溯源），标题只出现简称。
+# 键统一小写、连字符统一为「-」；按长度降序匹配，避免「Pattern Recognition Letters」
+# 先被「Pattern Recognition」截断。
+_VENUE_ABBREV: dict[str, str] = {
+    "ieee transactions on pattern analysis and machine intelligence": "TPAMI",
+    "ieee transactions on circuits and systems for video technology": "TCSVT",
+    "ieee transactions on neural networks and learning systems": "TNNLS",
+    "ieee transactions on geoscience and remote sensing": "TGRS",
+    "ieee transactions on computational imaging": "TCI",
+    "ieee transactions on medical imaging": "TMI",
+    "ieee transactions on image processing": "TIP",
+    "ieee transactions on intelligent transportation systems": "T-ITS",
+    "ieee transactions on multimedia": "TMM",
+    "international journal of computer vision": "IJCV",
+    "computer vision and image understanding": "CVIU",
+    "pattern recognition letters": "PRL",
+    "pattern recognition": "PR",
+    "knowledge-based systems": "KBS",
+    "medical image analysis": "MedIA",
+}
+_VENUE_KEYS = sorted(_VENUE_ABBREV, key=len, reverse=True)
+# 已经是简称的顶会/顶刊：标题里保持原样，不再做任何替换
+_SHORT_VENUES = {v.upper() for v in _VENUE_ABBREV.values()} | {
+    "CVPR", "ICCV", "ECCV", "NEURIPS", "NIPS", "ICML", "ICLR", "AAAI", "IJCAI",
+    "SIGGRAPH", "MM", "BMVC", "WACV", "MICCAI", "ICIP", "ICASSP", "3DV",
+}
+_VENUE_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+# 标题开头的「简称 + 年份 + 分隔符」：用于把「PR 2026｜X」统一成「PR 2026 | X」
+_LEAD_VENUE_LABEL_RE = re.compile(
+    r"^\s*([A-Za-z][A-Za-z&.\-]{1,14})\s*[,，]?\s*((?:19|20)\d{2})?\s*[|｜:：]\s*")
+
+
+def venue_abbrev(venue: str) -> str:
+    """期刊/会议全称 → 国际通用简称；没把握的 venue 返回空串（调用方保留全称）。"""
+    text = re.sub(r"[\u2010-\u2015]", "-", str(venue or ""))
+    text = re.sub(r"\s+", " ", text).strip().strip(",，.。;；")
+    text = re.sub(r"\s+", " ", _VENUE_YEAR_RE.sub(" ", text)).strip(" ,，")
+    if not text:
+        return ""
+    if text.upper() in _SHORT_VENUES:
+        return text.upper()
+    for key in _VENUE_KEYS:
+        if key in text.lower():
+            return _VENUE_ABBREV[key]
+    return ""
+
+
+def venue_short_label(venue: str, year: str = "") -> str:
+    """「Pattern Recognition 2026」→「PR 2026」；无映射的 venue 原样保留。"""
+    raw = str(venue or "").strip()
+    if not raw:
+        return ""
+    m = _VENUE_YEAR_RE.search(raw)
+    yr = m.group(0) if m else str(year or "").strip()
+    base = re.sub(r"[\s,，]+$", "", _VENUE_YEAR_RE.sub(" ", raw)).strip(" ,，")
+    name = venue_abbrev(base) or base
+    return f"{name} {yr}".strip() if yr else name
+
+
+def venue_card_label(venue: str, year: str = "") -> str:
+    """信息卡的期刊/会议行：全称在前、简称跟括号里，兼顾专业度与可检索性。"""
+    raw = str(venue or "").strip()
+    if not raw:
+        return str(year or "").strip()
+    ab = venue_abbrev(raw)
+    if not ab:
+        return f"{raw} {year}".strip() if year and not _VENUE_YEAR_RE.search(raw) else raw
+    if re.search(rf"(?<![A-Za-z]){re.escape(ab)}(?![A-Za-z])", raw, re.I):
+        return raw
+    return f"{raw}（{ab}）"
+
+
+def abbrev_title_venue(title: str) -> str:
+    """标题里的期刊/会议全称换成国际通用简称，顺带统一分隔符。
+
+    「Pattern Recognition 2026｜X」→「PR 2026 | X」；已用简称的标题只规范分隔符；
+    没有 venue 标签的标题（「无惧复杂失真！…」）原样返回。
+    """
+    out = str(title or "")
+    if not out.strip():
+        return out
+    lowered = out.lower()
+    for key in _VENUE_KEYS:
+        idx = lowered.find(key)
+        if idx < 0:
+            continue
+        # 只替换「后面紧跟年份或分隔符」的独立出现，避免误伤正文里的同名短语；
+        # 「Pattern Recognition (PR) 2026」这种自带括注的写法也认
+        tail = out[idx + len(key):]
+        if tail and not re.match(
+                r"^\s*[,，]?\s*(?:[（(]\s*[A-Za-z&.\- ]{1,20}\s*[)）])?\s*"
+                r"(?:(?:19|20)\d{2})?\s*(?:[|｜:：]|$)", tail):
+            continue
+        out = out[:idx] + _VENUE_ABBREV[key] + tail
+        # 「PR（PR）2026」这类全称+括注替换后的冗余括注直接去掉
+        out = re.sub(
+            rf"^(\s*{re.escape(_VENUE_ABBREV[key])})\s*[（(]\s*"
+            rf"{re.escape(_VENUE_ABBREV[key])}\s*[)）]", r"\1", out, flags=re.I)
+        break
+    m = _LEAD_VENUE_LABEL_RE.match(out)
+    if m and m.group(1).upper() in _SHORT_VENUES:
+        label = m.group(1).upper()
+        if m.group(2):
+            label = f"{label} {m.group(2)}"
+        out = f"{label} | {out[m.end():].strip()}"
+    return out
+
+
+# ------------------------------------------------------------------ 论文元数据卡
+# 论文稿开篇必须能溯源：论文原名（英文照抄）/ 发表期刊或会议 / 作者团队。
+# 行名的历史写法五花八门（论文标题、期刊/会议、作者…），统一收敛到下面三个正式行名。
+_PAPER_META_LABELS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("论文名称", ("论文名称", "论文标题", "论文题目", "论文名", "标题")),
+    ("发表期刊/会议", ("发表期刊/会议", "期刊/会议", "发表期刊", "发表会议", "期刊", "会议", "收录", "venue")),
+    ("作者团队", ("作者团队", "作者", "论文作者", "作者列表", "作者信息")),
+)
+
+
+_META_LABEL_PREFIX_RE = re.compile(r"^[0-9０-９一二三四五六七八九十]+\s*[、.．|｜)）:：]?\s*")
+
+
+# 信息卡里的占位值（「官方未公布」之流）不算信息，整行删掉：读者要的是能检索的事实。
+_PLACEHOLDER_VALUE_RE = re.compile(
+    r"^(?:官方)?\s*(?:未公布|未披露|未提供|未注明|未提及|未知|待定|待补充|暂无|无|n/?a|[-—–…]+)\s*[。.]?$",
+    re.I,
+)
+
+
+def _meta_kind(label: str) -> str:
+    key = str(label or "").strip().strip("：: 　|｜")
+    key = _META_LABEL_PREFIX_RE.sub("", key).strip().strip("：: 　|｜").lower()
+    for canonical, aliases in _PAPER_META_LABELS:
+        if key == canonical.lower() or key in (a.lower() for a in aliases):
+            return canonical
+    return ""
+
+
+def _authors_line(authors: list) -> str:
+    """信息卡的作者团队行：固定写成「由 A、B、C 等研究人员共同完成」。
+
+    裸人名列表读起来像通讯录，且模型偶尔写成「作者团队来自 A、B」（人名挂「来自」后
+    是语法硬伤）；这里直接落成唯一合法句式，超过 6 人只列前 6 位。
+    """
+    names = [str(a).strip() for a in (authors or []) if str(a).strip()]
+    if not names:
+        return ""
+    return "由 " + "、".join(names[:6]) + " 等研究人员共同完成"
+
+
+def paper_meta_values(item) -> dict[str, str]:
+    """从素材里取三行元数据的值；取不到的留空，由调用方跳过该行。"""
+    if item is None:
+        return {}
+    extra = getattr(item, "extra", None) or {}
+    pub = extra.get("publication") or {}
+    venue = str(pub.get("venue") or getattr(item, "venue", "") or "").strip()
+    if not venue:
+        haystack = f"{getattr(item, 'url', '')} {getattr(item, 'source', '')}".lower()
+        venue = "arXiv 预印本" if "arxiv" in haystack else "以原文标注为准"
+    return {
+        "论文名称": str(getattr(item, "title", "") or "").strip(),
+        "发表期刊/会议": venue_card_label(venue, getattr(item, "year", "") or ""),
+        "作者团队": _authors_line(getattr(item, "authors", None)),
+    }
+
+
+def ensure_paper_meta_card(spec: dict, item) -> int:
+    """成稿兜底：论文正文开篇必须有信息卡，且三行必选项齐全、置顶、行名规范。
+
+    模型实测会把信息卡整块漏掉（正文直接进 01 节），读者无法检索溯源；
+    这里按素材补卡、补行、并把三行排到最前。返回改动处数。
+    """
+    if item is None:
+        return 0
+    values = paper_meta_values(item)
+    if not values.get("论文名称"):
+        return 0
+    sections = spec.get("sections")
+    if not isinstance(sections, list):
+        return 0
+    card = next((b for b in sections if isinstance(b, dict) and b.get("type") == "meta_card"), None)
+    if card is None:
+        rows = [[k, values[k]] for k, _aliases in _PAPER_META_LABELS if values.get(k)]
+        extra_rows = []
+        code = str((getattr(item, "code_url", "") or "")).strip()
+        if code:
+            extra_rows.append(["开源代码", code])
+        sections.insert(0, {"type": "meta_card", "label": "PAPER INFO",
+                            "rows": rows + extra_rows})
+        return 1
+
+    rows = [list(r) for r in (card.get("rows") or [])
+            if isinstance(r, (list, tuple)) and len(r) >= 2]
+    kept = [r for r in rows if not _PLACEHOLDER_VALUE_RE.match(str(r[1]).strip())]
+    changed = len(rows) - len(kept)
+    rows = kept
+    for canonical, _aliases in _PAPER_META_LABELS:
+        found = next((r for r in rows if _meta_kind(r[0]) == canonical), None)
+        if found is None:
+            if values.get(canonical):
+                rows.append([canonical, values[canonical]])
+                changed += 1
+            continue
+        if str(found[0]).strip() != canonical:
+            found[0] = canonical
+            changed += 1
+        truth = values.get(canonical) or ""
+        if truth and truth != "以原文标注为准" and str(found[1]).strip() != truth:
+            found[1] = truth
+            changed += 1
+    head = [r for canonical, _a in _PAPER_META_LABELS
+            for r in rows if _meta_kind(r[0]) == canonical][:len(_PAPER_META_LABELS)]
+    ordered = head + [r for r in rows if all(r is not h for h in head)]
+    if [id(r) for r in ordered] != [id(r) for r in rows]:
+        changed += 1
+    if changed:
+        card["rows"] = ordered
+        if card.get("label") in (None, ""):
+            card["label"] = "PAPER INFO"
+    return changed
+
+
+# ------------------------------------------------------------------ 图文混排硬约束
+_ARCH_CAPTION_HINTS = ("架构", "框架", "流程", "总体", "概览", "overview", "architecture",
+                       "pipeline", "framework", "flowchart", "schematic", "workflow")
+
+
+def _section_bounds(sections: list, needles: tuple[str, ...]) -> tuple[int, int]:
+    start = None
+    for i, block in enumerate(sections):
+        if not isinstance(block, dict) or block.get("type") != "h2":
+            continue
+        text = str(block.get("text") or "")
+        if any(n in text for n in needles):
+            start = i
+            break
+    if start is None:
+        return -1, -1
+    end = len(sections)
+    for j in range(start + 1, len(sections)):
+        if isinstance(sections[j], dict) and sections[j].get("type") == "h2":
+            end = j
+            break
+    return start, end
+
+
+def _item_figure_refs(item, figures: dict) -> list[str]:
+    if item is None or not figures:
+        return []
+    key = f"{getattr(item, 'module', 'paper')}:{getattr(item, 'fingerprint', '')}"
+    return [ref for ref, meta in figures.items() if meta.get("item_id") == key]
+
+
+def _placed_figures(sections: list) -> int:
+    return sum(1 for b in sections if isinstance(b, dict) and b.get("type") == "figure")
+
+
+def _resolved_figure(block, figures: dict) -> bool:
+    if not isinstance(block, dict) or block.get("type") != "figure":
+        return False
+    return bool(figures) and str(block.get("ref") or "") in figures
+
+
+def scrub_dangling_figures(spec: dict, figures: dict) -> int:
+    """删掉指向不存在素材的 figure 块。
+
+    模型会自己写一个 `{"ref": "Fig.1"}` 占位，素材里根本没有这张图——渲染出来
+    是 `![]()` 空图，比不放图更糟。返回删掉的块数。
+    """
+    sections = spec.get("sections")
+    if not isinstance(sections, list):
+        return 0
+    kept = [b for b in sections if not (
+        isinstance(b, dict) and b.get("type") == "figure"
+        and not _resolved_figure(b, figures))]
+    dropped = len(sections) - len(kept)
+    if dropped:
+        spec["sections"] = kept
+    return dropped
+
+
+def ensure_paper_arch_figure(spec: dict, item, figures: dict) -> int:
+    """「核心创新与方法拆解」节必须有 figure 块；模型漏引时按素材自动补一张架构图。
+
+    返回补入的图数（0/1）。素材里没有可用的架构图时什么都不做——绝不凭空造图。
+    """
+    sections = spec.get("sections")
+    if not isinstance(sections, list):
+        return 0
+    start, end = _section_bounds(sections, ("核心创新", "方法拆解", "模型与", "架构"))
+    if start < 0:
+        return 0
+    if any(_resolved_figure(b, figures) for b in sections[start + 1:end]):
+        return 0
+    refs = _item_figure_refs(item, figures)
+    if not refs:
+        return 0
+    ref = next((r for r in refs
+                if any(h in str((figures.get(r) or {}).get("caption") or "").lower()
+                       for h in _ARCH_CAPTION_HINTS)), refs[0])
+    raw = str((figures.get(ref) or {}).get("caption") or "").strip()
+    number = _placed_figures(sections) + 1
+    caption = raw if re.match(r"^图\s*\d", raw) else f"图 {number}：{raw or '论文方法总体架构。'}"
+    insert_at = start + 1
+    for i in range(start + 1, end):
+        if isinstance(sections[i], dict) and sections[i].get("type") in ("p", "bullets"):
+            insert_at = i + 1
+            break
+    sections.insert(insert_at, {"type": "figure", "ref": ref, "caption": caption})
+    return 1
+
+
+def ensure_paper_result_table(spec: dict, item) -> int:
+    """「关键实验结果解读」节必须有 table 块；模型漏写时按素材原表补一张。
+
+    只补素材里真实存在的表（数字可溯源），不做任何改写。返回补入的表数（0/1）。
+    """
+    sections = spec.get("sections")
+    if not isinstance(sections, list):
+        return 0
+    start, end = _section_bounds(sections, ("实验结果", "实验与结果", "实验验证", "结果解读"))
+    if start < 0:
+        return 0
+    if any(isinstance(b, dict) and b.get("type") == "table" for b in sections[start + 1:end]):
+        return 0
+    tables = [t for t in ((getattr(item, "extra", None) or {}).get("tables") or [])
+              if isinstance(t, dict)]
+    if not tables:
+        return 0
+    table = compact_table(tables[0])
+    header = table.get("header") or []
+    rows = table.get("rows") or []
+    if not header or not rows:
+        return 0
+    sections.insert(end, {"type": "table", "header": header, "rows": rows})
+    return 1
+
+
+def paper_asset_gaps(spec, figures) -> dict:
+    """成稿红线：核心创新节必须真有结构图，实验结果节必须真有对比表。"""
+    sections = spec.get("sections") if isinstance(spec, dict) else None
+    if not isinstance(sections, list):
+        return {"figure": True, "table": True}
+
+    def _filled(value) -> bool:
+        """header / rows 是否真有内容：dict 形式的表头按内容判，不让类型差异抛错。"""
+        if isinstance(value, dict):
+            return any(_filled(v) for v in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(_filled(v) for v in value)
+        return bool(str(value).strip())
+
+    fig_start, fig_end = _section_bounds(sections, ("核心创新", "方法拆解", "模型与", "架构"))
+    figure_gap = fig_start < 0 or not any(
+        _resolved_figure(b, figures) for b in sections[fig_start + 1:fig_end])
+
+    tbl_start, tbl_end = _section_bounds(sections, ("实验结果", "实验与结果", "实验验证", "结果解读"))
+    table_gap = tbl_start < 0 or not any(
+        isinstance(b, dict) and b.get("type") == "table"
+        and _filled(b.get("header")) and _filled(b.get("rows"))
+        for b in sections[tbl_start + 1:tbl_end])
+
+    return {"figure": figure_gap, "table": table_gap}
+
+
+# ------------------------------------------------------------------ 作者表述语法
+# 「作者团队来自 Weihang Kong、Jienan Shen…」是人名直接挂在「来自」后面的语法硬伤。
+# 「来自」后面只能接机构；接人名必须写成「由 A、B 等人组成」。
+_AUTHOR_ORIGIN_RE = re.compile(
+    r"(作者团队|本文作者|论文作者|作者们|作者|研究团队|研究组|团队)"
+    r"(?:均|分别|共同)?来自\s*([^。；！？\n]{2,120})")
+_AFFILIATION_HINTS = ("大学", "学院", "研究所", "研究院", "实验室", "公司", "集团", "中心",
+                      "university", "institute", "laboratory", "lab", "inc", "ltd",
+                      "college", "school", "academy")
+_PERSON_LIST_RE = re.compile(r"[A-Z][a-z]+(?:\s+[A-Z][\w.\-']+)+")
+
+
+def recast_author_origin(sent: str) -> str:
+    """把「作者团队来自 A、B」改写成「作者团队由 A、B 等人组成」；机构名不动。"""
+    def sub(m: re.Match) -> str:
+        team, tail = m.group(1), m.group(2).strip()
+        if any(h in tail.lower() for h in _AFFILIATION_HINTS):
+            return m.group(0)
+        names = re.sub(r"[，,]?\s*等(?:人|研究人员)?\s*$", "", tail).strip(" ，,")
+        if not names:
+            return m.group(0)
+        if not (_PERSON_LIST_RE.search(names) or ("、" in names and len(names) <= 80)):
+            return m.group(0)
+        return f"{team}由 {names} 等人组成"
+
+    return _AUTHOR_ORIGIN_RE.sub(sub, sent)
+
+
+def scrub_paper_author_grammar(spec: dict) -> int:
+    """成稿兜底：正文与导语里的「来自 + 人名」全部改写成合规表述。"""
+    hits = _edit_sentences(spec, recast_author_origin)
+    lead = spec.get("lead")
+    if isinstance(lead, list):
+        for i, para in enumerate(lead):
+            if not isinstance(para, str) or not para.strip():
+                continue
+            new = recast_author_origin(para)
+            if new != para:
+                lead[i] = new
+                hits += 1
+    return hits
 
 
 # ------------------------------------------------------------------ 表格压缩

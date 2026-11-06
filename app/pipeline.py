@@ -55,19 +55,26 @@ from .sources import MODULE_LABEL, arxiv, collect
 from .sources import chinese_media as _chinese_media
 from .sources import competitions as _competitions
 from .sources import cvf
+from .sources import local_pdf as _local_pdf
 from .sources import paper_pdf as _paper_pdf
 from .sources import paper_search as _paper_search
 from .sources import publication as _publication
 from .sources.base import HttpClient
 from .spec_tools import (
     MAX_TABLE_COLS,
+    ensure_paper_arch_figure,
+    ensure_paper_meta_card,
+    ensure_paper_result_table,
     normalize_meta_cards,
     normalize_section_titles,
     normalize_wording,
+    paper_asset_gaps,
     prune_industry_offtopic,
     prune_spec_tables,
     renumber_sections,
     scrub_community_attribution,
+    scrub_dangling_figures,
+    scrub_paper_author_grammar,
     scrub_process_narration,
     scrub_reader_burden,
     strip_countdown_title,
@@ -239,6 +246,7 @@ async def run_module(module: str, *, publish: bool | None = None,
                      date_str: str | None = None, top_n: int | None = None,
                      demo: bool = False, variant: str | None = None,
                      paper_query: str | None = None,
+                     paper_path: str | None = None,
                      progress: Callable[..., None] | None = None) -> RunResult:
     """demo=True：走完整抓取/筛选/配图/成稿/渲染链路，但不写库、不记已用、不推送。
 
@@ -252,6 +260,11 @@ async def run_module(module: str, *, publish: bool | None = None,
     评分筛选，改为全网多源检索这篇论文（OpenAlex/Crossref/EuropePMC/Semantic
     Scholar/Google Scholar/ScienceDirect/IEEE → PDF/开放获取全文），整期只精读
     这一篇——历史去重与关键词过滤都为它让路（用户点名要这篇，不是编辑部的选择）。
+
+    paper_path：指定本地 PDF 文件路径（仅 module="paper"）。文件直接进高精解析
+    通道（pdf_tables() / 图像抽取 / 正文），元数据与 DOI 从 PDF 自身取；随后仍按
+    标题/DOI 跑全网检索补图床大图、代码仓与社区背景。与 paper_query 同时给出时，
+    以本地文件为准，标题仅用于检索。
 
     progress(stage, pct, msg, event=False)：可选进度回调（控制台轮询用）。
     只在里程碑处发 event=True；进度回调自身绝不允许把流水线搞挂。
@@ -283,22 +296,53 @@ async def run_module(module: str, *, publish: bool | None = None,
         except Exception:  # 进度回调只影响展示，绝不能反向打断任务
             pass
 
-    targeted = module == "paper" and bool(str(paper_query or "").strip())
+    targeted = module == "paper" and bool(str(paper_query or "").strip()
+                                         or str(paper_path or "").strip())
+    local_pdf_bytes = b""
     try:
         if targeted:
-            # 指定论文检索：不跑常规抓取，多源定位这一篇（失败直接报因，不降级成随机选题）
-            query = str(paper_query).strip()
-            report("检索", 3, f"按论文名称全网检索：{query[:60]}", True)
-            async with HttpClient() as client:
-                hit = await asyncio.wait_for(
-                    _paper_search.search_paper(client, query), timeout=150.0)
-            for trace in hit.traces:
-                if trace.ok or trace.count:
-                    _log(f"检索源 {trace.describe()}")
-                else:
-                    errors.append({"source": f"检索·{trace.source}", "error": trace.note,
-                                   "level": "warn"})
-            items = [ _paper_search.build_item(hit) ]
+            query = str(paper_query or "").strip()
+            if str(paper_path or "").strip():
+                # 本地 PDF 优先：文件在手边，先读元数据，再按标题/DOI 全网补全
+                report("检索", 3, "读取本地 PDF 并解析元数据…", True)
+                local_pdf_bytes = _local_pdf.read_local_pdf(str(paper_path))
+                meta = _local_pdf.front_matter(local_pdf_bytes)
+                item = _local_pdf.build_local_item(meta, str(paper_path))
+                query = query or meta.title
+                _log(f"本地 PDF：{meta.pages} 页 / 标题 {item.title[:60]} / "
+                     f"期刊 {meta.venue or '未识别'} / 作者 {len(meta.authors)} 位 / "
+                     f"DOI {meta.doi or '无'} / 代码仓 {'有' if meta.code_url else '无'}")
+                report("检索", 6, f"按本地 PDF 元数据全网补全：{query[:50]}", True)
+                try:
+                    async with HttpClient() as client:
+                        hit = await asyncio.wait_for(
+                            _paper_search.search_paper(client, query), timeout=150.0)
+                    for trace in hit.traces:
+                        if trace.ok or trace.count:
+                            _log(f"检索源 {trace.describe()}")
+                        else:
+                            errors.append({"source": f"检索·{trace.source}",
+                                           "error": trace.note, "level": "warn"})
+                    item = _local_pdf.merge_online(item, hit)
+                except Exception as exc:
+                    # 断网/被限流不该毁掉本地解析：PDF 本身就是最全的素材
+                    msg = f"全网补全未命中，仅用本地 PDF：{type(exc).__name__}: {str(exc)[:80]}"
+                    errors.append({"source": "本地 PDF·全网补全", "error": msg, "level": "warn"})
+                    _log(msg)
+                items = [item]
+            else:
+                # 指定论文检索：不跑常规抓取，多源定位这一篇（失败直接报因，不降级成随机选题）
+                report("检索", 3, f"按论文名称全网检索：{query[:60]}", True)
+                async with HttpClient() as client:
+                    hit = await asyncio.wait_for(
+                        _paper_search.search_paper(client, query), timeout=150.0)
+                for trace in hit.traces:
+                    if trace.ok or trace.count:
+                        _log(f"检索源 {trace.describe()}")
+                    else:
+                        errors.append({"source": f"检索·{trace.source}", "error": trace.note,
+                                       "level": "warn"})
+                items = [ _paper_search.build_item(hit) ]
             _log(f"命中：{items[0].title}（{items[0].venue} {items[0].year}，"
                  f"DOI {items[0].extra.get('doi') or '无'}，"
                  f"引用 {items[0].extra.get('citations', 0)}，"
@@ -441,14 +485,22 @@ async def run_module(module: str, *, publish: bool | None = None,
         async with HttpClient() as client:
             # enrich 必须在 select 之后：它很贵（每篇一趟 HTML），只给入选的几篇补
             if module == "paper" and targeted:
-                # 指定论文：PDF + 开放获取 XML 双通道取全文、表格、数值句与插图
-                report("配图", 40, "下载全文（PDF / 开放获取 XML）并提取图表…", True)
+                # 指定论文：PDF + 开放获取 XML 双通道取全文、表格、数值句与插图；
+                # 本地 PDF 已持有字节时跳过下载链，直接进解析
+                timeout = 300.0 if local_pdf_bytes else 200.0
+                if local_pdf_bytes:
+                    report("配图", 40, "解析本地 PDF 的表格与插图…", True)
+                else:
+                    report("配图", 40, "下载全文（PDF / 开放获取 XML）并提取图表…", True)
                 try:
                     summary = await asyncio.wait_for(
-                        _paper_pdf.enrich_target(client, selected[0]), timeout=200.0)
+                        _paper_pdf.enrich_target(
+                            client, selected[0], pdf_bytes=local_pdf_bytes,
+                            pdf_label="本地 PDF"),
+                        timeout=timeout)
                 except asyncio.TimeoutError:
                     summary = {}
-                    msg = "指定论文全文下载超时（>200s），本期按摘要与元数据撰写"
+                    msg = f"指定论文全文解析超时（>{timeout:.0f}s），本期按摘要与元数据撰写"
                     errors.append({"source": "指定论文全文", "error": msg})
                     _log(msg)
                 except Exception as exc:
@@ -749,6 +801,37 @@ async def run_module(module: str, *, publish: bool | None = None,
             _log("业界信息卡已合并「主体 + 事件」为单行，规模/金额折入事件描述")
         if normalize_wording(spec, module):
             _log("禁用措辞已替换（口语比喻 → 学术表述 / 抄作业 → 借鉴 等）")
+        # 论文稿的三条硬约束（Prompt 已立铁律，这里做确定性兜底）：
+        # 1) 开篇信息卡：论文名称 / 发表期刊/会议 / 作者团队三行是检索溯源的生命线，缺卡缺行直接补；
+        # 2) 作者语法：「作者团队来自 A、B」是人名挂在「来自」后面的硬伤，改写为「由 A、B 等人组成」；
+        # 3) 图文混排：「核心创新与方法拆解」必须有架构图，「关键实验结果解读」必须有对比表，
+        #    模型漏写时从素材里补（绝不凭空造图造表）。
+        if module == "paper" and selected:
+            if ensure_paper_meta_card(spec, selected[0]):
+                _log("论文信息卡已补全：论文名称 / 发表期刊/会议 / 作者团队三行置顶")
+            if scrub_paper_author_grammar(spec):
+                _log("作者表述已改写为「由 A、B 等人组成」（「来自 + 人名」是语法硬伤）")
+            if scrub_dangling_figures(spec, figures):
+                _log("已删除指向空素材的图块（避免渲染成 ![]() 空图）")
+            if ensure_paper_arch_figure(spec, selected[0], figures):
+                _log("「核心创新与方法拆解」已补入模型架构图（原稿缺 figure 块）")
+            if ensure_paper_result_table(spec, selected[0]):
+                _log("「关键实验结果解读」已补入论文原表（原稿缺 table 块）")
+            # 图表红线：补完之后仍然缺图又缺表，说明素材本身就没取到可解析内容——
+            # 这种稿子发出去就是纯文字通稿，直接报因不出稿；
+            # 只缺一样则如实降级，绝不编图、不造表、不臆造数字。
+            gaps = paper_asset_gaps(spec, figures)
+            if gaps["figure"] and gaps["table"]:
+                raise PipelineError(
+                    "论文图表红线未达标：核心创新节无结构图、实验结果节无对比表，"
+                    "PDF 渠道也未取到可解析素材——"
+                    + str((selected[0].extra or {}).get("pdf_failure") or "无 PDF 候选地址"))
+            if gaps["figure"] or gaps["table"]:
+                msg = ("论文图表红线告警：模型结构图缺失（已如实降级，不编图不造表）"
+                       if gaps["figure"]
+                       else "论文图表红线告警：实验对比表缺失（已如实降级，不编表不造数）")
+                errors.append({"source": "论文图表红线", "error": msg, "level": "warn"})
+                _log(msg)
         # 业界稿「零噪声」兜底：Prompt 立了单一事件铁律，但实测仍出现过商业快讯里
         # 夹进「ECCV 2026 论文 SparkVSR 开源，仓库 745 stars，最近更新 2026-08-03」
         # 这种与主线毫无关系的学术/仓库信息。这里按句、按条、按信息卡行做确定性删除——
