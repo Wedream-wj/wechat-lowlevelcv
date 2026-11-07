@@ -78,6 +78,15 @@ def connect() -> Iterator[sqlite3.Connection]:
 def init_db() -> None:
     with _lock, connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """给老库补列（人工润色需要记录版本与修改时间），幂等执行。"""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(issues)").fetchall()}
+    for name, ddl in (("edited_at", "TEXT"), ("rev", "INTEGER DEFAULT 0")):
+        if name not in cols:
+            conn.execute(f"ALTER TABLE issues ADD COLUMN {name} {ddl}")
 
 
 # 导入即建表（幂等），保证 CLI / 脚本 / 服务三种入口都不会缺表
@@ -274,6 +283,47 @@ def update_article_status(issue_id: str, status: str, media_id: str = "", error:
         )
 
 
+def update_article_content(issue_id: str, *, markdown: str, html: str, title: str = "",
+                           subtitle: str = "", digest: str = "",
+                           edited_at: datetime | None = None) -> dict:
+    """人工润色保存：Markdown / HTML 覆盖，标题与摘要跟随 md 同步，rev 自增。
+
+    状态语义：已经推过草稿箱的稿子被再次润色后置为 `edited`——后台那份是旧版，
+    必须重推才算生效，控制台据此提示「已润色·待重推」。返回空 dict 表示期号不存在。
+    """
+    stamp = edited_at or datetime.now()
+    with _lock, connect() as conn:
+        row = conn.execute("SELECT rev, status FROM issues WHERE issue_id=?",
+                           (issue_id,)).fetchone()
+        if not row:
+            return {}
+        rev = int(row["rev"] or 0) + 1
+        status = "edited" if row["status"] == "pushed" else (row["status"] or "rendered")
+        conn.execute(
+            """UPDATE issues SET markdown=?, html=?,
+                 title=COALESCE(NULLIF(?,''), title),
+                 subtitle=COALESCE(NULLIF(?,''), subtitle),
+                 digest=COALESCE(NULLIF(?,''), digest),
+                 edited_at=?, rev=?, status=?
+               WHERE issue_id=?""",
+            (markdown, html, title, subtitle, digest, stamp.isoformat(timespec="seconds"),
+             rev, status, issue_id),
+        )
+        return {"rev": rev, "edited_at": stamp, "status": status}
+
+
+def edit_meta(issue_id: str) -> dict:
+    """润色元信息（版本号 / 最后修改时间 / 当前状态），列表与编辑器都要显示。"""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT rev, edited_at, status FROM issues WHERE issue_id=?", (issue_id,)
+        ).fetchone()
+    if not row:
+        return {}
+    return {"rev": int(row["rev"] or 0), "edited_at": row["edited_at"] or "",
+            "status": row["status"] or "draft"}
+
+
 def delete_article(issue_id: str) -> bool:
     """删除一期稿件记录。返回是否真的删了（不存在返回 False），调用方决定要不要 404。"""
     with _lock, connect() as conn:
@@ -282,7 +332,8 @@ def delete_article(issue_id: str) -> bool:
 
 
 def list_articles(module: str | None = None, limit: int = 30) -> list[dict]:
-    sql = "SELECT issue_id, module, title, digest, created_at, status, wx_media_id FROM issues"
+    sql = ("SELECT issue_id, module, title, digest, created_at, status, wx_media_id, "
+           "rev, edited_at FROM issues")
     args: list = []
     if module:
         sql += " WHERE module=?"

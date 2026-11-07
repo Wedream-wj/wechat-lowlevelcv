@@ -78,6 +78,11 @@ uvicorn app.api:app --reload              # ③ 起控制台 http://127.0.0.1:80
 python -m scripts.check_sources
 ```
 
+> **别用另一个 Python 重建已有 venv**：`.venv` 里的 C 扩展（pydantic_core / numpy / lxml 等）是对应某个小版本编译的，
+> 用别的解释器再跑一次 `python -m venv .venv` 只会改写解释器与配置、不会重装依赖，结果是
+> `ImportError: cannot import name 'ArgsKwargs' from 'pydantic_core._pydantic_core'`（或各种 DLL load failed）。
+> 换解释器时要么 `rm -rf .venv` 后重建并 `pip install -r requirements.txt`，要么用建它时那个 `python -m venv --upgrade .venv` 原地升回去。
+
 控制台里点「生成一期」→ 完成后自动打开手机画框预览 → 确认后点「推草稿」，文章即出现在公众号后台草稿箱。
 
 ### 环境变量
@@ -280,11 +285,27 @@ challenge report：赛题定义、数据规格、评测协议、完整榜单、�
 | POST | `/api/run/{module}` | 触发出稿（后台任务），body 可传 `publish`、`top_n` |
 | GET | `/api/jobs/{id}` | 任务进度 |
 | GET | `/api/issues` · `/api/issues/{id}` | 成稿列表 / 详情 |
+| GET | `/api/issues/{id}/edit` | 编辑器初始化：Markdown 原文 + 版本信息 |
+| POST | `/api/issues/{id}/render` | Markdown → 微信排版 HTML（只排版不落库） |
+| POST | `/api/issues/{id}/content` | **保存润色稿**：服务端重排入库/落盘/重生成预览，rev 自增 |
 | GET | `/preview/{issue_id}` | 手机画框预览 |
 | GET | `/markdown/{issue_id}` | 该期 Markdown 原文（`text/markdown`，可直接复制/另存） |
-| POST | `/api/issues/{id}/push` | 推公众号草稿箱 |
+| POST | `/api/issues/{id}/push` | 推公众号草稿箱（**永远推送最后一次保存的润色版**） |
 | GET | `/api/prompts/{module}` | 查看完整 Prompt |
 | GET | `/api/sources` · `/api/orphans` | 数据源清单 / 未消耗素材 |
+
+## 7.5 人工润色编辑器（Markdown ⇄ 富文本双向同步）
+
+「最近出稿」每期新增 **编辑润色** 入口，打开双栏面板：
+
+- **左栏 Markdown 源码**：结构微调、链接修正、语法级编辑；改动 120ms 内实时渲染到右栏；
+- **右栏富文本**：按公众号排版观感呈现（小节蓝条 / 蓝底表头 / 图注），可直接改字、删句、调顺序，改动 220ms 内反解回左栏 Markdown；
+- **双向同步零脱节**：Markdown 是唯一事实源，右栏只是它的实时投影；保存前自动把右栏未落盘的改动反解回 Markdown（`flushRichToMd`）；
+- **保存即重排**：只把 Markdown 交给服务端（`app/render/md_parse.py` 解析 → `wechat.render_body` 重排），入库 + 落盘 `{id}.md / {id}.html / preview_{id}.html`，rev 自增；裸 HTML 会被转义，不可能注入；
+- **推送契约**：`push_issue` 现读库里的 HTML，因此推送内容**永远是最后一次保存的润色版**；已推过的稿子再润色会置为 `edited`（已润色·待重推），提示后台那份已过期；
+- **发布属性铁律不变**：原创声明 `文字原创`、合集 `每日推送`，推送前断言、推完补勾（见 `app/publish/attrs.py`）；
+- **图表红线**：表格 / 配图 / 图注在两栏转换中按结构保留（`tests/test_md_edit.py` 有逐格断言），不会因同步被误删；
+- 离线体检：`python -m scripts.verify_edit_panel`（临时实例 + Edge 真浏览器走完「载入 → 左改右现 → 右改左现 → 保存 → 落库」全程，需要 `pip install playwright`）。
 
 ## 8. 测试
 
@@ -292,7 +313,7 @@ challenge report：赛题定义、数据规格、评测协议、完整榜单、�
 python -m unittest discover -s tests -v
 ```
 
-覆盖（406 例）：lowlevelcv 解析器（用真实页面夹具）、评分与筛选、JSON 修复、Spec 校验、微信渲染（内联样式/转义/内联语法）、Markdown 导出、图片格式归一、四个赛事源的解析与蜜罐识别、报名状态判定与练习赛门槛、赛事/业界封面选图、标题自审、观点内化、发布属性断言、业界「事件级查重 / 同批合并 / 主题纯粹性清洗 / 数字核对」（`tests/test_industry_focus.py`）、以及指定论文检索的「标题匹配 / 多源合并 / JATS 表格 / 图注区域渲染 / 单元格校验 / Sci-Hub 合规默认」（`tests/test_paper_search.py`）。
+覆盖（484 例）：lowlevelcv 解析器（用真实页面夹具）、评分与筛选、JSON 修复、Spec 校验、微信渲染（内联样式/转义/内联语法）、Markdown 导出、图片格式归一、四个赛事源的解析与蜜罐识别、报名状态判定与练习赛门槛、赛事/业界封面选图、标题自审、观点内化、发布属性断言、业界「事件级查重 / 同批合并 / 主题纯粹性清洗 / 数字核对」（`tests/test_industry_focus.py`）、指定论文检索的「标题匹配 / 多源合并 / JATS 表格 / 图注区域渲染 / 单元格校验 / Sci-Hub 合规默认」（`tests/test_paper_search.py`）、以及人工润色链路的「Markdown 反解 / 图表保全 / 落库版本 / 推送取最新版与发布属性」（`tests/test_md_edit.py`）。
 
 ## 9. 部署建议
 

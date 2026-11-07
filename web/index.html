@@ -168,6 +168,123 @@
     border-bottom:1px solid var(--line);}
   .dlg-head h3{margin:0;font-size:14px;}
   .dlg-body{padding:18px 20px 22px;}
+
+  /* ---------- 人工润色编辑器：左 Markdown 源码 / 右富文本，双向实时同步 ---------- */
+  #edit-dialog{max-width:1380px;width:calc(100% - 28px);height:calc(100% - 44px);display:none;}
+  #edit-dialog[open]{display:flex;flex-direction:column;}
+  .edit-head{display:flex;align-items:center;gap:14px;padding:12px 18px;border-bottom:1px solid var(--line);flex-wrap:wrap;}
+  .edit-head .titles{flex:1;min-width:240px;display:flex;flex-direction:column;gap:3px;}
+  .edit-head .titles strong{font-size:13.5px;line-height:1.5;}
+  .edit-head .titles span{font-size:11px;color:var(--sub);}
+  .edit-tools{display:flex;gap:7px;flex-wrap:wrap;align-items:center;}
+  .edit-tools button{padding:7px 11px;font-size:12px;}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;}
+  .seg button{border:none;border-radius:0;padding:6px 11px;font-size:11.5px;background:#fff;color:#5A6070;}
+  .seg button.on{background:var(--primary-soft);color:var(--primary);font-weight:600;}
+  .edit-panes{flex:1;display:grid;grid-template-columns:1fr 1fr;min-height:0;}
+  .edit-panes.md-only{grid-template-columns:1fr;}
+  .edit-panes.rich-only{grid-template-columns:1fr;}
+  .edit-panes.md-only .rich-pane,.edit-panes.rich-only .md-pane{display:none;}
+  .pane{display:flex;flex-direction:column;min-height:0;min-width:0;}
+  .md-pane{border-right:1px solid var(--line);}
+  .edit-panes.rich-only .md-pane{border-right:none;}
+  .pane-head{display:flex;justify-content:space-between;gap:8px;padding:7px 14px;font-size:11px;
+    color:var(--sub);background:#FAFBFD;border-bottom:1px solid #EEF0F5;}
+  .pane-head b{color:#4A4F5A;font-size:11px;letter-spacing:.5px;}
+  #edit-md{flex:1;border:none;outline:none;resize:none;padding:14px 16px;background:#fff;
+    font-family:Menlo,Consolas,"Courier New",monospace;font-size:12.5px;line-height:1.85;
+    color:#24293A;tab-size:2;}
+  .rich-scroll{flex:1;overflow:auto;background:#EFF1F6;padding:16px;}
+  .rich-body{max-width:432px;margin:0 auto;background:#fff;border-radius:10px;padding:20px 16px 28px;
+    min-height:100%;outline:none;box-shadow:0 2px 14px rgba(20,26,50,.08);
+    font-size:15px;line-height:1.9;color:#2B2E36;}
+  .rich-body:focus{box-shadow:0 0 0 2px rgba(42,75,215,.16),0 2px 14px rgba(20,26,50,.08);}
+  .rich-body .x-title{font-size:20px;line-height:1.45;font-weight:800;margin:0 0 8px;letter-spacing:.2px;}
+  .rich-body .x-sub{font-size:13.5px;color:#6B7280;border-left:3px solid #E7E9EF;padding-left:10px;
+    margin:0 0 16px;line-height:1.8;}
+  .rich-body p{margin:0 0 15px;text-align:justify;letter-spacing:.3px;}
+  .rich-body .x-h2{margin:30px 0 14px;padding-left:11px;border-left:4px solid var(--primary);}
+  .rich-body .x-h2 .kicker{font-size:10px;color:var(--primary);letter-spacing:2px;font-weight:700;line-height:1.4;}
+  .rich-body .x-h2 .sec-title{font-size:16.5px;font-weight:700;color:#12151B;line-height:1.55;}
+  .rich-body h3{font-size:15px;margin:22px 0 10px;color:var(--primary);}
+  .rich-body table{width:100%;border-collapse:collapse;margin:16px 0;font-size:11.5px;}
+  .rich-body th{background:var(--primary);color:#fff;padding:7px 6px;text-align:left;font-weight:600;}
+  .rich-body td{padding:7px 6px;border-bottom:1px solid #EDEFF4;color:#33373F;}
+  .rich-body figure{margin:20px 0;}
+  .rich-body figure img{width:100%;border-radius:6px;display:block;}
+  .rich-body figcaption{font-size:11.5px;color:#8A90A0;margin-top:7px;line-height:1.7;}
+  .rich-body blockquote{margin:16px 0;padding:10px 14px;background:#F7F8FC;
+    border-left:3px solid #C7D3FF;color:#3A4050;font-size:14px;}
+  .rich-body ul,.rich-body ol{margin:0 0 15px;padding-left:20px;}
+  .rich-body li{margin:4px 0;}
+  .rich-body ul.meta{list-style:none;padding:8px 12px;background:#F8FAFF;border:1px solid #E6E8EE;border-radius:8px;font-size:12.5px;}
+  .rich-body ul.meta li{margin:3px 0;color:#3A4050;}
+  .rich-body code{background:#F1F3F8;border-radius:3px;padding:1px 5px;font-size:12.5px;}
+  .rich-body pre{background:#151A24;color:#E8ECF5;padding:12px;border-radius:8px;overflow:auto;font-size:12px;line-height:1.7;}
+  .rich-body pre code{background:none;color:inherit;padding:0;}
+  .rich-body hr{border:none;border-top:1px dashed var(--line);margin:22px 0;}
+  .rich-body a{color:var(--primary);border-bottom:1px solid #C7D3FF;text-decoration:none;}
+  .rich-body mark{background:linear-gradient(transparent 58%,#FFEFC2 58%);font-weight:600;}
+  .edit-foot{display:flex;justify-content:space-between;gap:12px;padding:9px 18px;border-top:1px solid var(--line);
+    font-size:11.5px;color:var(--sub);background:#FAFBFD;}
+  .edit-foot .saved{color:#1B8F5A;font-weight:600;}
+  .edit-foot .dirty{color:#C0392B;font-weight:600;}
+
+  /* ---------- 最近出稿 · 操作按钮组：按动作权重分色，统一规格 ----------
+     一套色相即一套层级：翠绿=终局发布 · 琥珀=内容加工 · Slate=取用工具 · 蓝灰幽灵=只读查看 · 红幽灵=破坏性
+     四个动作用四种「明度+彩度」区分，扫一眼就知道该点哪个，也不会盖过后台主 CTA */
+  .issue .ops{flex-wrap:wrap;justify-content:flex-end;gap:8px;}
+  .issue .ops a{display:inline-flex;}
+  button.op{
+    display:inline-flex;align-items:center;gap:6px;
+    height:30px;padding:0 11px;font-size:12px;font-weight:500;line-height:1;
+    border:1px solid transparent;border-radius:8px;background:#fff;color:#2B2E36;
+    box-shadow:0 1px 2px rgba(20,26,50,.06);white-space:nowrap;
+    transition:background .2s,border-color .2s,box-shadow .2s,transform .2s,color .2s;
+  }
+  button.op svg{width:13px;height:13px;flex:none;fill:none;stroke:currentColor;
+    stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;}
+  button.op:hover{transform:translateY(-1px);box-shadow:0 4px 10px rgba(20,26,50,.11);}
+  button.op:active{transform:translateY(0);box-shadow:0 1px 2px rgba(20,26,50,.08);}
+  button.op:disabled{transform:none;box-shadow:none;}
+  /* ① 推草稿：翠绿实心。整条流水线的落脚点，视觉权重最高 */
+  button.op-push{
+    background:linear-gradient(135deg,#10B981,#059669);border-color:#059669;
+    color:#fff;font-weight:700;letter-spacing:.2px;
+    box-shadow:0 2px 8px rgba(5,150,105,.28);
+  }
+  button.op-push:hover{
+    background:linear-gradient(135deg,#34D399,#059669);border-color:#047857;color:#fff;
+    box-shadow:0 6px 16px rgba(5,150,105,.34);
+  }
+  /* ② 编辑润色：琥珀实心。中高优，比发布轻一档 */
+  button.op-edit{
+    background:linear-gradient(135deg,#F59E0B,#D97706);border-color:#D97706;
+    color:#fff;font-weight:600;letter-spacing:.2px;
+    box-shadow:0 2px 8px rgba(217,119,6,.22);
+  }
+  button.op-edit:hover{
+    background:linear-gradient(135deg,#FBBF24,#D97706);border-color:#B45309;color:#fff;
+    box-shadow:0 6px 14px rgba(217,119,6,.3);
+  }
+  /* ③ 复制 MD：柔和中性（Slate tonal）。工具性动作，需要一眼可辨，
+     但不能像深色实心那样和发布/编辑抢戏——浅底深字，轻一档 */
+  button.op-copy{
+    background:#EBEFF5;border-color:#DCE2EC;color:#334155;font-weight:600;
+    box-shadow:0 1px 2px rgba(30,41,59,.06);
+  }
+  button.op-copy:hover{
+    background:#DFE5EF;border-color:#C3CCDC;color:#1E293B;
+    box-shadow:0 4px 10px rgba(30,41,59,.12);
+  }
+  /* ④ 预览：极浅蓝灰幽灵。只读查看，退到最底层，给界面留呼吸（比复制 MD 更淡一档） */
+  button.op-view{
+    background:#FAFBFD;border-color:#E1E5EE;color:#5A6070;box-shadow:0 1px 2px rgba(20,26,50,.05);
+  }
+  button.op-view:hover{background:#F1F4FA;border-color:#CBD4E4;color:#2B2E36;}
+  /* ⑤ 删除：红幽灵。保留警示语义，但不给实心红的侵略感 */
+  button.op-del{background:#fff;border-color:#F0C7C2;color:#C0392B;box-shadow:none;}
+  button.op-del:hover{background:#FDF1EF;border-color:#D9553F;color:#A93226;box-shadow:0 4px 10px rgba(192,57,43,.12);}
 </style>
 </head>
 <body>
@@ -303,8 +420,38 @@
   <div class="dlg-body"><div class="prompt-box" id="prompt-body"></div></div>
 </dialog>
 
-<div class="toast" id="toast"></div>
+<dialog id="edit-dialog">
+  <div class="edit-head">
+    <div class="titles">
+      <strong id="edit-title">标题</strong>
+      <span id="edit-meta">—</span>
+    </div>
+    <div class="edit-tools">
+      <div class="seg" id="edit-seg">
+        <button data-view="split" class="on" onclick="setEditView('split')">双栏</button>
+        <button data-view="md" onclick="setEditView('md')">Markdown</button>
+        <button data-view="rich" onclick="setEditView('rich')">富文本</button>
+      </div>
+      <a id="edit-preview-link" href="#" target="_blank" style="display:inline-block;"><button class="ghost">预览</button></a>
+      <button id="edit-save" onclick="saveEditor()">保存并生效</button>
+      <button class="cta-green" id="edit-push" onclick="pushFromEditor()">推送到草稿箱</button>
+      <button class="ghost" onclick="closeEditor()">关闭</button>
+    </div>
+  </div>
+  <div class="edit-panes" id="edit-panes">
+    <div class="pane md-pane">
+      <div class="pane-head"><b>MARKDOWN 源码</b><span>改一个字，右侧富文本立刻跟着变</span></div>
+      <textarea id="edit-md" spellcheck="false" placeholder="在这里编辑 Markdown…"></textarea>
+    </div>
+    <div class="pane rich-pane">
+      <div class="pane-head"><b>富文本 · 公众号排版</b><span>可直接改字、删句、调顺序，反向生成 Markdown</span></div>
+      <div class="rich-scroll"><div class="rich-body" id="edit-rich" contenteditable="true" spellcheck="false"></div></div>
+    </div>
+  </div>
+  <div class="edit-foot"><span id="edit-status">—</span><span id="edit-counts"></span></div>
+</dialog>
 
+<div class="toast" id="toast"></div>
 <script>
 const MODULE_LABEL = {paper:"学术论文", industry:"业界进展", contest:"赛事竞赛"};
 const STAGES = ["抓取","筛选","配图","成稿","排版"];
@@ -345,6 +492,15 @@ async function loadHealth(){
   }catch(e){ log("健康检查失败：" + e); }
 }
 
+/* 操作按钮图标：统一 24 视窗描边线性风格，颜色跟随 currentColor，尺寸由 .op svg 控制 */
+const ICON = {
+  eye:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.6 12S6.2 5.8 12 5.8 21.4 12 21.4 12 17.8 18.2 12 18.2 2.6 12 2.6 12Z"/><circle cx="12" cy="12" r="3"/></svg>',
+  pen:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4.2L20 8.2 15.8 4 4 15.8V20Z"/><path d="M13.9 5.9 18.1 10.1"/></svg>',
+  copy:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2.2"/><path d="M6.4 15H5.6A1.6 1.6 0 0 1 4 13.4V5.6A1.6 1.6 0 0 1 5.6 4h7.8A1.6 1.6 0 0 1 15 5.6v.9"/></svg>',
+  send:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.8 3.2 10.4 13.6"/><path d="M20.8 3.2 14.6 21l-4.2-7.4L3 9.4 20.8 3.2Z"/></svg>',
+  trash:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.2 6.8h15.6"/><path d="M9.4 3.8h5.2"/><path d="M6.6 6.8 7.6 20h8.8l1-13.2"/><path d="M10.6 10.6v6M13.4 10.6v6"/></svg>'
+};
+
 function renderIssues(list){
   const box = document.getElementById("issues");
   document.getElementById("issue-count").textContent = list.length ? `共 ${list.length} 期` : "";
@@ -359,19 +515,24 @@ function renderIssues(list){
           <span class="status ${x.status||""}">${statusText(x.status)}</span>
           <span>${MODULE_LABEL[x.module]||x.module}</span>
           <span>${(x.created_at||"").replace("T"," ").slice(0,16)}</span>
+          ${x.rev ? `<span class="chip">已润色 ${x.rev} 版</span>` : ""}
           <span>${escapeHtml(x.issue_id||"")}</span>
         </div>
       </div>
       <div class="ops">
-        <a href="/preview/${x.issue_id}" target="_blank"><button>预览</button></a>
-        <button onclick="copyMarkdown('${x.issue_id}')">复制 MD</button>
-        <button onclick="pushIssue('${x.issue_id}', this)">推草稿</button>
-        <button class="danger" onclick="deleteIssue('${x.issue_id}', this)">删除</button>
+        <a href="/preview/${x.issue_id}" target="_blank" title="打开手机画框预览"><button class="op op-view">${ICON.eye}<span>预览</span></button></a>
+        <button class="op op-edit" onclick="openEditor('${x.issue_id}')"
+                title="左 Markdown / 右富文本双向实时同步，保存后推送即用最新版">${ICON.pen}<span>编辑润色</span></button>
+        <button class="op op-copy" onclick="copyMarkdown('${x.issue_id}')"
+                title="复制 Markdown 源码，可粘贴到公众号正文区">${ICON.copy}<span>复制 MD</span></button>
+        <button class="op op-push" onclick="pushIssue('${x.issue_id}', this)"
+                title="推入公众号草稿箱（自动勾选「文字原创」+「每日推送」合集）">${ICON.send}<span>推草稿</span></button>
+        <button class="op op-del" onclick="deleteIssue('${x.issue_id}', this)" title="删除本地草稿">${ICON.trash}<span>删除</span></button>
       </div>
     </div>`).join("");
 }
 function statusText(s){
-  return {pushed:"已入草稿箱", rendered:"已排版", draft:"草稿", failed:"失败"}[s] || (s||"—");
+  return {pushed:"已入草稿箱", rendered:"已排版", edited:"已润色·待重推", draft:"草稿", failed:"失败"}[s] || (s||"—");
 }
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
@@ -597,6 +758,397 @@ async function pushIssue(id, btn){
   }finally{ btn.disabled = false; }
 }
 
+/* ================= 人工润色编辑器：Markdown ⇄ 富文本双向同步 =================
+   唯一事实源是 Markdown：左栏改动 → 本地渲染右栏；右栏改动 → 反解成 Markdown。
+   保存时只把 Markdown 交给服务端重新排版（微信只认那套内联样式），
+   因此「推草稿」读到的 HTML 必然是最新润色稿，两栏也不会脱节。 */
+const editorState = {id:null, md:"", rev:0, dirty:false, busy:false, timer:null, source:"md"};
+
+function assetSrc(src){
+  const s = String(src || "").trim();
+  if(!s) return "";
+  if(/^(https?:|data:)/i.test(s)) return s;
+  return "/out/" + s.replace(/^\/+/, "");
+}
+function deAsset(src){
+  return String(src || "").trim()
+    .replace(/^https?:\/\/[^/]+\/out\//i, "")
+    .replace(/^\/out\//, "");
+}
+
+function inlineHtml(text){
+  let s = escapeHtml(text);
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (m, t, u) => `<a href="${u}" target="_blank" rel="noreferrer">${t}</a>`);
+  s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/==(.+?)==/g, "<mark>$1</mark>");
+  s = s.replace(/`([^`]+?)`/g, "<code>$1</code>");
+  return s.replace(/\n/g, "<br>");
+}
+
+const _TABLE_SEP = /^\|(\s*:?-{2,}:?\s*\|)+$/;
+
+// Markdown → 富文本（语义标签 + 类名，样式由 .rich-body 里的 CSS 还原公众号观感）
+function mdToHtml(md){
+  const lines = String(md || "").replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let i = 0;
+  const cells = r => r.replace(/^\|/, "").replace(/\|$/, "").split("|").map(c => c.trim());
+  while(i < lines.length){
+    const line = lines[i].trim();
+    if(!line){ i++; continue; }
+    if(line.startsWith("# ") && !line.startsWith("## ")){
+      out.push(`<h1 class="x-title">${inlineHtml(line.slice(2).trim())}</h1>`); i++; continue;
+    }
+    if(line.startsWith("## ")){
+      const text = line.slice(3).trim();
+      const m = text.match(/^(\d{1,2})\s*[|｜]\s*(.+)$/);
+      const no = m ? m[1] : "";
+      out.push(`<div class="x-h2" data-no="${no}">`
+        + (no ? `<div class="kicker">SECTION ${no}</div>` : "")
+        + `<div class="sec-title">${inlineHtml(m ? m[2] : text)}</div></div>`);
+      i++; continue;
+    }
+    if(line.startsWith("### ")){ out.push(`<h3>${inlineHtml(line.slice(4).trim())}</h3>`); i++; continue; }
+    if(/^```/.test(line)){
+      const body = []; i++;
+      while(i < lines.length && !/^```/.test(lines[i].trim())){ body.push(lines[i]); i++; }
+      i++;
+      out.push(`<pre><code>${escapeHtml(body.join("\n"))}</code></pre>`);
+      continue;
+    }
+    const img = line.match(/^!\[(.*?)\]\((.*?)\)$/);
+    if(img){
+      const alt = img[1].trim(), src = img[2].trim();
+      out.push(`<figure><img src="${escapeHtml(assetSrc(src))}" alt="${escapeHtml(alt)}">`
+        + (alt ? `<figcaption>${inlineHtml(alt)}</figcaption>` : "") + "</figure>");
+      i++; continue;
+    }
+    if(line.startsWith("|")){
+      const rows = [];
+      while(i < lines.length && lines[i].trim().startsWith("|")){
+        if(!_TABLE_SEP.test(lines[i].trim())) rows.push(lines[i].trim());
+        i++;
+      }
+      if(rows.length){
+        const head = cells(rows[0]);
+        out.push("<table><thead><tr>" + head.map(h => `<th>${inlineHtml(h)}</th>`).join("") + "</tr></thead><tbody>"
+          + rows.slice(1).map(r => "<tr>" + cells(r).map(c => `<td>${inlineHtml(c)}</td>`).join("") + "</tr>").join("")
+          + "</tbody></table>");
+      }
+      continue;
+    }
+    if(/^[-*]\s+/.test(line)){
+      const items = [];
+      while(i < lines.length){
+        const m = lines[i].trim().match(/^[-*]\s+(.+)$/);
+        if(!m) break;
+        items.push(m[1].trim()); i++;
+      }
+      const allMeta = items.length >= 2 && items.every(x => /^\*\*(.+?)\*\*\s*[：:]\s*.+$/.test(x));
+      out.push(`<ul${allMeta ? ' class="meta"' : ""}>` + items.map(x => `<li>${inlineHtml(x)}</li>`).join("") + "</ul>");
+      continue;
+    }
+    if(/^\d+\.\s+/.test(line)){
+      const items = [];
+      while(i < lines.length){
+        const m = lines[i].trim().match(/^\d+\.\s+(.+)$/);
+        if(!m) break;
+        items.push(m[1].trim()); i++;
+      }
+      out.push("<ol>" + items.map(x => `<li>${inlineHtml(x)}</li>`).join("") + "</ol>");
+      continue;
+    }
+    if(line.startsWith(">")){
+      const qs = [];
+      while(i < lines.length){
+        const m = lines[i].trim().match(/^>\s?(.*)$/);
+        if(!m) break;
+        qs.push(m[1].trim()); i++;
+      }
+      const afterTitle = out.length === 1 && /^<h1 class="x-title"/.test(out[0]);
+      if(afterTitle && qs.length === 1) out.push(`<p class="x-sub">${inlineHtml(qs[0])}</p>`);
+      else out.push(`<blockquote>${inlineHtml(qs.join("\n"))}</blockquote>`);
+      continue;
+    }
+    if(line === "---" || line === "***" || line === "___"){ out.push("<hr>"); i++; continue; }
+    // 普通段落：连续非空行直到块级语法
+    const para = [line]; i++;
+    while(i < lines.length){
+      const nx = lines[i].trim();
+      if(!nx || nx.startsWith("#") || nx.startsWith("|") || nx.startsWith(">")
+         || /^[-*]\s+/.test(nx) || /^\d+\.\s+/.test(nx) || /^!\[.*\]\(.*\)$/.test(nx)
+         || /^```/.test(nx) || ["---", "***", "___"].includes(nx)) break;
+      para.push(nx); i++;
+    }
+    out.push(`<p>${inlineHtml(para.join("\n"))}</p>`);
+  }
+  return out.join("\n");
+}
+
+// 行内节点 → Markdown 文本
+function inlineMd(node){
+  let s = "";
+  node.childNodes.forEach(n => {
+    if(n.nodeType === 3){ s += n.nodeValue.replace(/\u00a0/g, " "); return; }
+    if(n.nodeType !== 1) return;
+    const tag = n.tagName;
+    if(tag === "BR"){ s += "\n"; return; }
+    if(tag === "IMG"){ s += `![${n.getAttribute("alt") || ""}](${deAsset(n.getAttribute("src") || "")})`; return; }
+    if(tag === "STRONG" || tag === "B"){ const x = inlineMd(n).trim(); if(x) s += `**${x}**`; return; }
+    if(tag === "EM" || tag === "I"){ const x = inlineMd(n).trim(); if(x) s += `*${x}*`; return; }
+    if(tag === "CODE"){ s += "`" + n.textContent + "`"; return; }
+    if(tag === "MARK"){ const x = inlineMd(n).trim(); if(x) s += `==${x}==`; return; }
+    if(tag === "A"){
+      const x = inlineMd(n).trim();
+      const href = n.getAttribute("href") || "";
+      s += (/^https?:/.test(href) && x) ? `[${x}](${href})` : x;
+      return;
+    }
+    if(tag === "P" || tag === "DIV" || tag === "SECTION"){
+      const inner = inlineMd(n);
+      if(inner.trim()) s += "\n" + inner.trim() + "\n";
+      return;
+    }
+    const style = n.getAttribute("style") || "";
+    const inner = inlineMd(n);
+    if(/font-weight\s*:\s*(bold|bolder|[6-9]00)/i.test(style) && inner.trim()){
+      s += `**${inner.trim()}**`; return;
+    }
+    s += inner;
+  });
+  return s;
+}
+
+// 富文本 → Markdown（contenteditable 里的语义标签都能反解，图表标签不丢）
+function htmlToMd(root){
+  const blocks = [];
+  const push = t => { const v = String(t || "").replace(/\n{3,}/g, "\n\n").trim(); if(v) blocks.push(v); };
+  [...root.children].forEach(el => {
+    const tag = el.tagName;
+    if(tag === "DIV" && el.classList.contains("x-h2")){
+      const no = el.dataset.no || "";
+      const title = el.querySelector(".sec-title");
+      const text = (title ? title.textContent : el.textContent).trim();
+      push(`## ${no ? no + " | " : ""}${text}`);
+      return;
+    }
+    if(tag === "H1" || tag === "H2" || tag === "H3"){
+      const prefix = tag === "H1" ? "# " : tag === "H2" ? "## " : "### ";
+      push(prefix + el.textContent.trim());
+      return;
+    }
+    if(tag === "P" && el.classList.contains("x-sub")){ push("> " + inlineMd(el).trim()); return; }
+    if(tag === "P"){ push(inlineMd(el)); return; }
+    if(tag === "BLOCKQUOTE"){
+      push(inlineMd(el).trim().split("\n").map(l => "> " + l.trim()).join("\n"));
+      return;
+    }
+    if(tag === "UL" || tag === "OL"){
+      const items = [...el.querySelectorAll(":scope > li")].map((li, idx) => {
+        const x = inlineMd(li).trim().replace(/\n+/g, " ");
+        return tag === "UL" ? "- " + x : `${idx + 1}. ${x}`;
+      });
+      push(items.join("\n"));
+      return;
+    }
+    if(tag === "TABLE"){
+      const rows = [...el.querySelectorAll("tr")].map(tr =>
+        [...tr.children].map(c => c.textContent.trim().replace(/\|/g, "\\|")));
+      if(rows.length){
+        const line = r => "| " + r.join(" | ") + " |";
+        push([line(rows[0]), "|" + rows[0].map(() => "---").join("|") + "|",
+              ...rows.slice(1).map(line)].join("\n"));
+      }
+      return;
+    }
+    if(tag === "FIGURE"){
+      const img = el.querySelector("img");
+      const cap = el.querySelector("figcaption");
+      const alt = (img && img.getAttribute("alt")) || (cap ? cap.textContent.trim() : "");
+      const src = img ? deAsset(img.getAttribute("src") || "") : "";
+      if(src || alt) push(`![${alt}](${src})`);
+      return;
+    }
+    if(tag === "IMG"){
+      push(`![${el.getAttribute("alt") || ""}](${deAsset(el.getAttribute("src") || "")})`);
+      return;
+    }
+    if(tag === "PRE"){
+      push("```\n" + el.textContent.replace(/\n+$/, "") + "\n```");
+      return;
+    }
+    if(tag === "HR"){ push("---"); return; }
+    const inner = inlineMd(el).trim();
+    if(inner) push(inner);
+  });
+  return blocks.join("\n\n") + "\n";
+}
+
+function setEditView(view){
+  const panes = document.getElementById("edit-panes");
+  panes.classList.remove("md-only", "rich-only");
+  if(view === "md") panes.classList.add("md-only");
+  if(view === "rich") panes.classList.add("rich-only");
+  [...document.querySelectorAll("#edit-seg button")].forEach(b => {
+    b.classList.toggle("on", b.dataset.view === view);
+  });
+}
+
+function setEditStatus(text, cls){
+  const el = document.getElementById("edit-status");
+  el.textContent = text;
+  el.className = cls || "";
+}
+
+function updateEditCounts(){
+  const md = document.getElementById("edit-md").value || "";
+  const chars = md.replace(/\s/g, "").length;
+  document.getElementById("edit-counts").textContent =
+    `Markdown ${md.length} 字符 · 正文 ${chars} 字 · 第 ${editorState.rev || 0} 版`;
+}
+
+function markEditDirty(){
+  editorState.dirty = true;
+  setEditStatus("有未保存的修改（保存后推送才会用这一版）", "dirty");
+  updateEditCounts();
+}
+
+function onMdInput(){
+  editorState.source = "md";
+  clearTimeout(editorState.timer);
+  editorState.timer = setTimeout(() => {
+    const md = document.getElementById("edit-md").value;
+    editorState.md = md;
+    editorState.busy = true;
+    document.getElementById("edit-rich").innerHTML = mdToHtml(md);  // 左 → 右
+    editorState.busy = false;
+    markEditDirty();
+  }, 120);
+}
+
+function onRichInput(){
+  if(editorState.busy) return;
+  editorState.source = "rich";
+  clearTimeout(editorState.timer);
+  editorState.timer = setTimeout(() => {
+    const md = htmlToMd(document.getElementById("edit-rich"));        // 右 → 左
+    document.getElementById("edit-md").value = md;
+    editorState.md = md;
+    markEditDirty();
+  }, 220);
+}
+
+// 保存前把还在防抖队列里的富文本改动落到 Markdown（只有最后在右栏编辑时才需要）
+function flushRichToMd(){
+  clearTimeout(editorState.timer);
+  if(editorState.source !== "rich") return;
+  const md = htmlToMd(document.getElementById("edit-rich"));
+  document.getElementById("edit-md").value = md;
+  editorState.md = md;
+}
+
+async function openEditor(id){
+  try{
+    const r = await fetch(`/api/issues/${id}/edit`);
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || "读取失败");
+    editorState.id = id;
+    editorState.md = d.markdown || "";
+    editorState.rev = d.rev || 0;
+    editorState.dirty = false;
+    editorState.source = "md";
+    document.getElementById("edit-title").textContent = d.title || "(无标题)";
+    document.getElementById("edit-meta").textContent =
+      `${id} · ${statusText(d.status)} · 第 ${d.rev || 0} 版`
+      + (d.edited_at ? ` · 上次润色 ${String(d.edited_at).replace("T", " ").slice(0, 16)}` : "");
+    document.getElementById("edit-md").value = d.markdown || "";
+    document.getElementById("edit-rich").innerHTML = mdToHtml(d.markdown || "");
+    document.getElementById("edit-preview-link").href = `/preview/${id}`;
+    setEditStatus("已载入：两栏实时同步，保存后「推草稿」即用这一版", "");
+    updateEditCounts();
+    const dlg = document.getElementById("edit-dialog");
+    if(!dlg.open) dlg.showModal();
+    setEditView("split");
+    log(`打开编辑器：${id}（第 ${d.rev || 0} 版，${(d.markdown || "").length} 字符）`);
+  }catch(e){
+    toast("打开编辑器失败：" + e.message);
+    log("打开编辑器失败：" + e.message);
+  }
+}
+
+function closeEditor(){
+  if(editorState.dirty && !confirm("还有未保存的修改，确定关闭吗？")) return;
+  document.getElementById("edit-dialog").close();
+  editorState.dirty = false;
+}
+
+async function saveEditor(silent){
+  flushRichToMd();
+  const md = document.getElementById("edit-md").value;
+  if(!md.trim()){ toast("Markdown 不能为空"); return false; }
+  const btn = document.getElementById("edit-save");
+  btn.disabled = true;
+  setEditStatus("保存中：服务端正在按 Markdown 重新排版…", "");
+  try{
+    const r = await fetch(`/api/issues/${editorState.id}/content`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({markdown: md})
+    });
+    const d = await r.json();
+    if(!r.ok){ throw new Error(d.detail || d.error || "保存失败"); }
+    editorState.md = d.markdown;
+    editorState.rev = d.rev;
+    editorState.dirty = false;
+    document.getElementById("edit-md").value = d.markdown;
+    document.getElementById("edit-title").textContent = d.title || "(无标题)";
+    document.getElementById("edit-meta").textContent =
+      `${d.issue_id} · ${statusText(d.status)} · 第 ${d.rev} 版 · ${String(d.edited_at).replace("T", " ").slice(0, 16)}`;
+    setEditStatus(`已保存：第 ${d.rev} 版，服务端重排 ${(d.html.length / 1024).toFixed(1)}KB · ${d.words} 字`, "saved");
+    updateEditCounts();
+    log(`润色已保存：${d.issue_id} 第 ${d.rev} 版（${d.words} 字 / ${d.sections} 个小节），推草稿将使用这一版`);
+    if(!silent) toast("已保存，推草稿将使用润色后的最新版");
+    loadIssues();
+    return true;
+  }catch(e){
+    setEditStatus("保存失败：" + e.message, "dirty");
+    toast("保存失败：" + e.message);
+    return false;
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+async function pushFromEditor(){
+  if(editorState.dirty){
+    if(!confirm("有未保存的修改，先保存再推送？\n\n取消则不会推送。")) return;
+    const ok = await saveEditor(true);
+    if(!ok) return;
+  }
+  const btn = document.getElementById("edit-push");
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = "推送中…";
+  setEditStatus("正在推送草稿箱（如未配置自动勾选，会列出后台待办）…", "");
+  try{
+    const r = await fetch(`/api/issues/${editorState.id}/push`, {method: "POST"});
+    const d = await r.json();
+    if(!r.ok){ throw new Error(d.detail || d.error || "推送失败"); }
+    const a = d.attrs || {};
+    setEditStatus(`已推送草稿箱 · 第 ${editorState.rev} 版`
+      + (a.describe ? ` · ${a.describe}` : ""), "saved");
+    log(`推送成功：${editorState.id}（第 ${editorState.rev} 版）media_id=${d.media_id}`);
+    (a.todo || []).forEach(t => log(`待办：${t}`));
+    toast(a.ui_ok ? "已入草稿箱，原创与合集已勾选" : "已入草稿箱，原创/合集待补勾");
+    loadIssues();
+  }catch(e){
+    setEditStatus("推送失败：" + e.message, "dirty");
+    toast("推送失败：" + e.message);
+    log("推送失败：" + e.message);
+  }finally{
+    btn.disabled = false; btn.textContent = old;
+  }
+}
+
 async function deleteIssue(id, btn){
   if(!confirm(`确定删除本地草稿 ${id} 吗？\n\n将删除：数据库记录 + 本地的 .md / .html / 预览页。\n已推入公众号草稿箱的内容不受影响，且此操作不可恢复。`)) return;
   btn.disabled = true;
@@ -625,6 +1177,17 @@ async function openPrompt(module, key){
     document.getElementById("prompt-body").textContent = d.prompt;
   }catch(e){ document.getElementById("prompt-body").textContent = "加载失败：" + e; }
 }
+
+// 编辑器事件绑定：输入双向同步、Esc 关闭前拦未保存、Ctrl/Cmd+S 直接保存
+document.getElementById("edit-md").addEventListener("input", onMdInput);
+document.getElementById("edit-rich").addEventListener("input", onRichInput);
+document.getElementById("edit-rich").addEventListener("blur", flushRichToMd);
+document.getElementById("edit-dialog").addEventListener("cancel", e => {
+  e.preventDefault(); closeEditor();
+});
+document.getElementById("edit-dialog").addEventListener("keydown", e => {
+  if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s"){ e.preventDefault(); saveEditor(); }
+});
 
 loadHealth(); loadIssues();
 setInterval(loadHealth, 30000);

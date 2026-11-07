@@ -20,10 +20,11 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, Uplo
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import db
+from . import db, edit
 from .config import ROOT, force_utf8_stdio, settings, topics
 from .llm.client import usage
 from .llm.prompts import PROMPTS
+from .models import Article
 from .pipeline import PipelineError, push_issue, run_module
 from .scheduler import build_scheduler
 from .sources import COLLECTORS, MODULE_LABEL
@@ -300,6 +301,76 @@ async def push(issue_id: str, request: Request) -> dict:
         raise HTTPException(400, str(exc)) from exc
     return {"ok": True, "issue_id": article.issue_id, "media_id": article.wx_media_id,
             "status": article.status, "attrs": article.wx_attrs}
+
+
+# ---------------------------------------------------------------- 人工润色（Markdown ⇄ 富文本）
+def _load_for_edit(issue_id: str) -> Article:
+    if Path(issue_id).name != issue_id or issue_id in {".", ".."}:
+        raise HTTPException(404, "期号不合法")
+    article = db.get_article(issue_id)
+    if not article:
+        raise HTTPException(404, "期号不存在")
+    return article
+
+
+@app.get("/api/issues/{issue_id}/edit")
+async def issue_edit(issue_id: str) -> dict:
+    """编辑器初始化：返回 Markdown 原文（唯一事实源）与版本信息。
+
+    不返回 HTML：编辑器右侧富文本由前端用同一套样式实时渲染 Markdown，
+    保证「左边改一个字、右边立刻变」，也不会把上次的旧 HTML 带进来。
+    """
+    article = _load_for_edit(issue_id)
+    meta = db.edit_meta(issue_id)
+    return {
+        "issue_id": issue_id,
+        "module": article.module,
+        "title": article.title,
+        "markdown": article.markdown,
+        "status": meta.get("status", article.status),
+        "rev": meta.get("rev", 0),
+        "edited_at": meta.get("edited_at", ""),
+        "cover": edit.cover_relative(article),
+    }
+
+
+@app.post("/api/issues/{issue_id}/render")
+async def issue_render(issue_id: str, request: Request) -> dict:
+    """Markdown → 微信排版 HTML（只排版不落库，编辑器保存前预览/校验用）。"""
+    _check_admin(request)
+    article = _load_for_edit(issue_id)
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    try:
+        result = edit.render_edit(article, str(body.get("markdown") or ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"issue_id": issue_id, "html": result.html, "title": result.title,
+            "words": result.words, "sections": result.sections}
+
+
+@app.post("/api/issues/{issue_id}/content")
+async def issue_save_content(issue_id: str, request: Request) -> dict:
+    """保存润色稿：服务端按 Markdown 重新排版 → 入库 / 落盘 / 重生成预览。
+
+    保存成功后，该期在库里的 HTML 就是润色后的版本；「推草稿」按 issue_id 现读现推，
+    因此推送内容永远是最后一次保存的稿子（已推过的会置为 edited，提示需要重推）。
+    """
+    _check_admin(request)
+    article = _load_for_edit(issue_id)
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    try:
+        payload = edit.save_edit(article, str(body.get("markdown") or ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return payload
 
 
 @app.get("/api/wechat/check")
