@@ -80,6 +80,31 @@
   }
   button.cta-purple:active{transform:translateY(0);box-shadow:0 1px 4px rgba(109,40,217,.28);}
   button.cta-purple:disabled{box-shadow:none;}
+  /* 本地论文解读：青色 CTA。蓝=常规出稿、绿=baseline、紫=论文名检索、青=本地 PDF 解析，
+     四种出稿动作各占一个色相；文件选择按钮则保持低调的虚线样式，不与 CTA 抢注意力 */
+  button.cta-cyan{
+    background:linear-gradient(135deg,#22B8CF,#0E7490);
+    border-color:#0E7490;color:#fff;font-weight:600;letter-spacing:.2px;
+    box-shadow:0 2px 8px rgba(14,116,144,.26);
+    white-space:nowrap;
+  }
+  button.cta-cyan:hover{
+    background:linear-gradient(135deg,#4FD1E5,#0E7490);
+    border-color:#155E75;color:#fff;
+    box-shadow:0 6px 16px rgba(14,116,144,.32);
+    transform:translateY(-1px);
+  }
+  button.cta-cyan:active{transform:translateY(0);box-shadow:0 1px 4px rgba(14,116,144,.28);}
+  button.cta-cyan:disabled{box-shadow:none;}
+  button.btn-file{
+    border-style:dashed;color:#5A6070;padding:6px 11px;font-size:12px;
+  }
+  button.btn-file:hover{border-color:#22B8CF;color:#0E7490;background:#F0FBFD;}
+  .local-pdf-panel{
+    margin-top:10px;padding-top:10px;border-top:1px dashed var(--line,#E7E9EF);
+  }
+  .local-pdf-panel .sub-entry{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;}
+  .local-pdf-panel .sub-hint{font-size:11px;color:var(--sub,#6B7280);}
   button.danger{color:#C0392B;border-color:#F0C7C2;}
   button.danger:hover{background:#FDF1EF;border-color:#C0392B;}
   button.ghost{background:transparent;}
@@ -179,6 +204,21 @@
                style="flex:1;min-width:0;padding:6px 10px;border:1px solid var(--line,#d8dee9);border-radius:8px;font-size:12px;">
         <button class="cta-purple" onclick="run('paper', this, {query: document.getElementById('paper-query').value})"
                 title="按论文名多源检索（OpenAlex / Crossref / Europe PMC / Semantic Scholar / Google Scholar / ScienceDirect / IEEE）并整期精读">按论文名精读</button>
+      </div>
+      <div class="local-pdf-panel">
+        <div class="sub-entry"><span class="chip">本地论文解读</span>
+          <span class="sub-hint">手头有 PDF 原文时用这个：本地高精解析表格与插图，再按标题/DOI 全网补全</span></div>
+        <div style="display:flex;gap:6px;margin-top:6px;">
+          <button class="btn-file" onclick="document.getElementById('paper-pdf-file').click()"
+                  title="选择本地 PDF（浏览器会自动上传到本机服务端）">选择文件</button>
+          <input id="paper-pdf-path" type="text"
+                 placeholder="或直接粘贴 PDF 完整路径，如 D:\papers\xxx.pdf"
+                 style="flex:1;min-width:0;padding:6px 10px;border:1px solid var(--line,#d8dee9);border-radius:8px;font-size:12px;">
+          <button class="cta-cyan" onclick="runLocalPdf(this)"
+                  title="本地 PDF 高精解析（表格/结构图/正文）+ 全网多源补全，成稿后可一键推草稿">开始解析与多源解读</button>
+        </div>
+        <input type="file" id="paper-pdf-file" accept="application/pdf,.pdf" hidden
+               onchange="uploadPdf(this)">
       </div>
       <div class="runbox" id="runbox-paper" hidden>
         <div class="runbar"><div class="runbar-fill" id="bar-paper"></div></div>
@@ -362,12 +402,43 @@ function resetRunbox(module){
   return ui;
 }
 
-async function run(module, btn, extra){
-  const ui = resetRunbox(module);
+// 文件选择器桥接：浏览器只给 fakepath，拿不到真实本地路径，
+// 所以选中的文件直接上传到本机服务端，换回服务器上的绝对路径填进输入框
+async function uploadPdf(input){
+  const file = input.files && input.files[0];
+  input.value = ""; // 允许重复选择同一个文件
+  if(!file){ return; }
+  log(`上传 PDF「${file.name}」（${(file.size / 1024 / 1024).toFixed(1)}MB）到服务端…`);
+  try{
+    const fd = new FormData();
+    fd.append("file", file);
+    const r = await fetch("/api/upload/pdf", {method:"POST", body:fd});
+    if(!r.ok){ throw new Error(await r.text()); }
+    const d = await r.json();
+    document.getElementById("paper-pdf-path").value = d.path;
+    log(`PDF 已就绪：${d.path}`);
+  }catch(e){
+    log("上传失败：" + e.message + "——可直接把完整路径粘贴到输入框");
+  }
+}
+
+// 本地论文解读入口：路径非空即触发（后端会再校验文件存在性与 PDF 头）
+function runLocalPdf(btn){
+  const path = document.getElementById("paper-pdf-path").value.trim();
+  if(!path){
+    log("请先选择 PDF 文件，或粘贴本地 PDF 完整路径");
+    document.getElementById("paper-pdf-path").focus();
+    return;
+  }
+  run("paper", btn, {pdf: path});
+}
+
+async function run(module, btn, extra){  const ui = resetRunbox(module);
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = "生成中…";
   const searching = extra && extra.query;
-  log(`开始生成「${MODULE_LABEL[module]}${extra && extra.variant ? " · baseline 精读" : ""}${searching ? " · 指定论文名检索：" + extra.query : ""}」，${searching ? "全网检索 + 全文提取 + 成稿" : "抓取 + 成稿"}通常需要 1–4 分钟…`);
+  const localPdf = extra && extra.pdf;
+  log(`开始生成「${MODULE_LABEL[module]}${extra && extra.variant ? " · baseline 精读" : ""}${searching ? " · 指定论文名检索：" + extra.query : ""}${localPdf ? " · 本地论文解读：" + localPdf : ""}」，${localPdf ? "本地 PDF 解析 + 全网补全 + 成稿" : searching ? "全网检索 + 全文提取 + 成稿" : "抓取 + 成稿"}通常需要 1–4 分钟…`);
   const startedAt = Date.now();
   ui.elapsed.textContent = "0s";
   const timer = setInterval(()=>{

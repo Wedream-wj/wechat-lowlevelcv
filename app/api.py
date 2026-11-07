@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -116,7 +116,8 @@ async def prompt(module: str) -> dict:
 
 
 async def _run_job(job_id: str, module: str, publish: bool | None, top_n: int | None,
-                   variant: str | None = None, query: str | None = None) -> None:
+                   variant: str | None = None, query: str | None = None,
+                   pdf_path: str | None = None) -> None:
     job = JOBS[job_id]
     job.update({"status": "running", "started_at": datetime.now().isoformat()})
     # 进度与里程碑事件由 run_module 的回调实时写入，前端每 1.5s 轮询展示
@@ -138,6 +139,7 @@ async def _run_job(job_id: str, module: str, publish: bool | None, top_n: int | 
     try:
         result = await run_module(module, publish=publish, top_n=top_n, variant=variant,
                                   paper_query=query if module == "paper" else None,
+                                  paper_path=pdf_path if module == "paper" else None,
                                   progress=on_progress)
         if result.article:
             job.update({
@@ -170,11 +172,44 @@ async def run(module: str, request: Request, background: BackgroundTasks) -> dic
         body = await request.json()
     except Exception:
         pass
+    # 本地论文解读：body.pdf 携带本地 PDF 绝对路径（或上传端点返回的服务器路径）
+    pdf = str(body.get("pdf") or "").strip() or None
+    if pdf and module == "paper":
+        if not Path(pdf).is_file():
+            raise HTTPException(400, f"本地 PDF 不存在：{pdf}（请检查盘符与路径分隔符）")
+        if not pdf.lower().endswith(".pdf"):
+            raise HTTPException(400, f"只支持 PDF 文件：{pdf}")
+    elif pdf:
+        pdf = None  # pdf 参数仅对 paper 模块生效，其他模块静默忽略
     job_id = uuid.uuid4().hex[:10]
     JOBS[job_id] = {"status": "queued", "module": module, "created_at": datetime.now().isoformat()}
     background.add_task(_run_job, job_id, module, body.get("publish"), body.get("top_n"),
-                        body.get("variant"), (str(body.get("query") or "").strip() or None))
+                        body.get("variant"), (str(body.get("query") or "").strip() or None), pdf)
     return {"job_id": job_id, "module": module}
+
+
+@app.post("/api/upload/pdf")
+async def upload_pdf(request: Request, file: UploadFile = File(...)) -> dict:
+    """本地论文解读的文件选择器桥接。
+
+    浏览器安全模型拿不到本地完整路径（只给 C:\\fakepath\\xx.pdf），所以真
+    「选择文件」必须把文件传到服务端再跑解析——服务器就在本机，上传等价于
+    原地读取。保存到 out/uploads/，带时间戳前缀防同名覆盖。
+    """
+    _check_admin(request)
+    name = Path(file.filename or "paper.pdf").name or "paper.pdf"
+    if not name.lower().endswith(".pdf"):
+        raise HTTPException(400, "只支持 .pdf 文件")
+    data = await file.read()
+    if not data.startswith(b"%PDF"):
+        raise HTTPException(400, "文件内容不是合法 PDF（缺少 %PDF 头）")
+    if len(data) > 200 * 1024 * 1024:
+        raise HTTPException(400, "PDF 超过 200MB 上限")
+    dest_dir = settings.out_dir / "uploads"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_{name}"
+    dest.write_bytes(data)
+    return {"path": str(dest.resolve()), "name": name, "size": len(data)}
 
 
 @app.get("/api/jobs/{job_id}")
