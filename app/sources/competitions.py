@@ -30,6 +30,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, quote_plus
 
 from ..config import topics
+from ..filters import recency
 from ..filters.scoring import score_item
 from ..models import Item
 from . import contest_visual, headless
@@ -173,7 +174,11 @@ def parse_deadline(text: str) -> datetime | None:
             except ValueError:
                 return None
 
-    if dt is None or not (2020 <= dt.year <= datetime.now().year + 3):
+    # 年份下限必须放得足够老：2019 年的赛事页今天仍可能被爬到，解析成 None
+    # 就等于「没有截止线索」，随后被 confirmed_active 一路放行——实测
+    # 「FlyAI 超分挑战赛（2019-11-18）」正是这样混进成稿的。老日期要能解析出来，
+    # 才能在时效闸门里被明确判为「已过期」而不是「未知」。
+    if dt is None or not (datetime.now().year - 15 <= dt.year <= datetime.now().year + 3):
         return None
     return dt
 
@@ -219,40 +224,29 @@ def _is_low_value(item: Item) -> bool:
 
 
 def filter_active(items: list[Item], upcoming_days: int = 120, now: datetime | None = None) -> list[Item]:
-    """强时效过滤：过期 / 超出推荐窗口 / 无截止线索的赛事一律丢弃。
+    """强时效过滤：过期 / 超出推荐窗口 / 无法证明时效的赛事一律丢弃。
 
-    deadline 的语义是「报名截止与比赛结束中较早者」，由各数据源写 extra["deadline"]（原始串）。
+    具体判据在 `filters.recency`（赛事时效闸门）：截止已过一票否决、历史老赛事否决、
+    无日期线索且没有接口级「在办」标记也否决。这里只额外负责「练习赛」这类低价值筛选，
+    然后把两层的日志合成一行。
     """
-    now = now or datetime.now()
-    horizon = now + timedelta(days=upcoming_days)
-    expired = windowed = undated = lowvalue = 0
-    kept: list[Item] = []
-    for item in items:
-        if _is_low_value(item):
-            lowvalue += 1
-            continue
-        raw = str(item.extra.get("deadline") or "")
-        dl = parse_deadline(raw) if raw else None
-        if dl is not None:
-            if dl <= now:
-                expired += 1
-                continue
-            if dl > horizon:
-                windowed += 1
-                continue
-            item.extra["days_left"] = (dl - now).days
-            item.score += 2.0
-            if item.extra["days_left"] <= 30:
-                item.score += 1.0  # 快截止的赛事对读者更紧迫
-        elif item.extra.get("confirmed_active"):
-            item.score += 1.0  # 无明确截止但确认进行中（如接口标记 isActive 的场次）
-        else:
-            undated += 1
-            continue
-        kept.append(item)
+    lowvalue = [i for i in items if _is_low_value(i)]
+    pool = [i for i in items if not _is_low_value(i)]
+    kept, rejected = recency.gate(pool, now=now, upcoming_days=upcoming_days)
+
+    buckets: dict[str, int] = {}
+    for row in rejected:
+        buckets[row["status"]] = buckets.get(row["status"], 0) + 1
+    detail = " / ".join(
+        f"{label} {buckets.get(key, 0)}"
+        for key, label in (("expired", "已过期"), ("historical", "历史老赛事"),
+                           ("windowed", "超出窗口"), ("undated", "无时效证据"))
+        if buckets.get(key)
+    )
     print(
-        f"[contest] 时效过滤：过期 {expired} / 超出 {upcoming_days} 天窗口 {windowed} / "
-        f"无截止线索 {undated} / 练习赛 {lowvalue}，保留 {len(kept)}",
+        f"[contest] 时效过滤：{detail or '无否决'} / 练习赛 {len(lowvalue)}，"
+        f"保留 {len(kept)}"
+        + (f"；否决示例：{recency.describe_rejects(rejected)}" if rejected else ""),
         flush=True,
     )
     return kept

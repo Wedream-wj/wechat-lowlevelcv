@@ -157,6 +157,14 @@
   .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#151A24;color:#fff;
     padding:10px 16px;border-radius:9px;font-size:12.5px;opacity:0;pointer-events:none;transition:.25s;z-index:99;}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(-4px);}
+  /* 论文名输入防呆：空值拦截时的红框 + 抖动反馈 */
+  @keyframes guardShake{
+    0%,100%{transform:translateX(0);}
+    20%{transform:translateX(-5px);} 40%{transform:translateX(5px);}
+    60%{transform:translateX(-3px);} 80%{transform:translateX(3px);}
+  }
+  .guard-shake{animation:guardShake .4s ease;}
+  .guard-empty{border-color:#E5484D !important;box-shadow:0 0 0 3px rgba(229,72,77,.14);}
   .demo-links{display:flex;gap:8px;flex-wrap:wrap;}
   .demo-links a{font-size:12px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;}
   .demo-links a:hover{border-color:#C9D2F5;}
@@ -472,7 +480,8 @@ function log(msg){
 function toast(msg){
   const el = document.getElementById("toast");
   el.textContent = msg; el.classList.add("show");
-  setTimeout(()=>el.classList.remove("show"), 1800);
+  clearTimeout(toast._t);
+  toast._t = setTimeout(()=>el.classList.remove("show"), 1800);
 }
 
 async function loadHealth(){
@@ -594,7 +603,24 @@ function runLocalPdf(btn){
   run("paper", btn, {pdf: path});
 }
 
-async function run(module, btn, extra){  const ui = resetRunbox(module);
+async function run(module, btn, extra){
+  // 防呆：指定论文名检索时，输入框 trim 后为空 → 拦截请求，不给后端发空参数
+  if (extra && Object.prototype.hasOwnProperty.call(extra, "query") && !(extra.query || "").trim()){
+    const input = document.getElementById("paper-query");
+    if (input){
+      input.classList.remove("guard-shake"); void input.offsetWidth; // 重置动画
+      input.classList.add("guard-shake", "guard-empty");
+      input.focus();
+      setTimeout(()=>input.classList.remove("guard-empty"), 2400);
+    }
+    toast("检索关键词不能为空，请输入论文全称或关键词");
+    log("已拦截：论文名输入框为空，未发起检索请求");
+    return;
+  }
+  if (extra && Object.prototype.hasOwnProperty.call(extra, "query")){
+    extra = {...extra, query: extra.query.trim()};
+  }
+  const ui = resetRunbox(module);
   const old = btn.textContent;
   btn.disabled = true; btn.textContent = "生成中…";
   const searching = extra && extra.query;

@@ -525,6 +525,11 @@ competitions:
     require_keyword_hit: 0
     # 只保留未截止、或截止时间在未来 N 天内的赛事
     upcoming_days: 120
+    # 时效闸门（app/filters/recency.py）：比赛结束超过 history_days 天的一律视为
+    # 历史老赛事，一票否决——2026 年时 2023 年及更早的场次不再进候选
+    history_days: 730
+    # 没有任何未来日期时，最后一条时间证据的最大容许陈旧度：超了就是已结束的场次
+    stale_days: 120
   # 单篇精读放开的赛道：底层视觉 / CV / 深度学习 / AI 泛领域，均可入选
   focus:
     - 底层视觉与图像复原（超分、去噪、去模糊、暗光、压缩伪影）

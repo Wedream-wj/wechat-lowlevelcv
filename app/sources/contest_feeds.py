@@ -346,13 +346,16 @@ def parse_flyai(html: str) -> list[Item]:
                 "origin": "flyai",
                 "platform": "FlyAI",
                 "prize": prize,
-                # 平台赛题以「长期有效」的练习赛为主，没有报名截止；标 evergreen，
-                # 时效过滤按「长期开放」放行，但不参与倒计时加分
+                # 平台赛题以「长期有效」的练习赛为主，没有报名截止。注意：**不能**因此
+                # 打 confirmed_active（那等于替它担保「此刻在办」）——实测静态镜像站里
+                # 挂着 2019-11-18 截止的「超分挑战赛」，靠这个标记一路穿到了成稿。
+                # 现在只保留 evergreen 供展示，时效闸门要求它必须有可核验的近期日期，
+                # 否则一律判「无时效证据」剔除。
                 "deadline": "",
                 "entry_url": url,
                 "tags": tags,
                 "evergreen": True,
-                "confirmed_active": True,
+                "needs_verify": True,
                 "contest_detail": {"source": "FlyAI 赛事页"},
             },
         )

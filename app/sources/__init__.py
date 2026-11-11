@@ -6,6 +6,7 @@ import time
 from typing import Awaitable, Callable
 
 from ..models import Item
+from ..filters import recency
 from .base import HttpClient
 from . import (arxiv, awesome_llv, chinese_media, competitions, contest_feeds, cvf,
                github_trending, industry, lowlevelcv, paperswithcode)
@@ -137,5 +138,24 @@ async def collect(module: str,
                 if current is None or item.score > current.score:
                     merged[item.fingerprint] = item
         items = list(merged.values())
+
+        # 赛事时效闸门（第二道，全源覆盖）：`competitions.fetch()` 内部已经过一遍，
+        # 但雷达 / ML Contests / Codabench / FlyAI 是**独立源**，它们的条目只在这里汇合。
+        # 实测 FlyAI 把 2019 年的「超分挑战赛」标成「长期开放」直接漏了进来——
+        # 所以闸门必须架在所有源汇合之后，而不是某一个源内部。
+        if module == "contest":
+            pending = [i for i in items if "recency" not in (i.extra or {})]
+            kept, rejected = recency.gate(pending)
+            if rejected:
+                print(f"[sources:contest] 时效闸门：剔除 {len(rejected)} 条过期/无时效证据赛事——"
+                      f"{recency.describe_rejects(rejected)}", flush=True)
+                errors.append({
+                    "source": "时效闸门",
+                    "error": f"剔除 {len(rejected)} 条过期/无时效证据赛事："
+                             + "；".join(f"{r['title'][:20]}（{r['reason'][:30]}）"
+                                        for r in rejected[:3]),
+                    "level": "info",
+                })
+            items = [i for i in items if "recency" in (i.extra or {})]
 
     return items, errors

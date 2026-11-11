@@ -191,13 +191,16 @@ wechat-lowlevelcv/
   - **AI 赛事雷达**（`app/sources/contest_feeds.py::fetch_radar`）：`ye4wzp.github.io/ai-contest-radar` 的 Astro 页面内嵌 `window.__DATA__`，一次吐 800+ 条赛事，是目前覆盖面最广的一路（含天智杯、CCF、地方赛、企业赛）；
   - **ML Contests**（`fetch_mlcontests`）：`data-competitions` 属性里是一段 HTML 转义过的 JSON，`html.unescape` 后直接 `json.loads`；
   - **Codabench**（`fetch_codabench`）：DRF 可浏览 API 页里 `pre.prettyprint` 内嵌完整 JSON；该站直连会命中 iocaine 蜜罐（返回《1984》随机段落 + 状态码 200），需无头浏览器兜底；
-  - **FlyAI**（`fetch_flyai`）：主站上瑞数验证码（无头浏览器同样拦），改走静态镜像；这类常年开赛的练习型赛事标 `evergreen` 并降权；
+  - **FlyAI**（`fetch_flyai`）：主站上瑞数验证码（无头浏览器同样拦），改走静态镜像；这类常年开赛的练习型赛事标 `evergreen` 并降权。**不再替它打 `confirmed_active`**——那是「此刻在办」的担保，静态镜像里 2019 年的老场次正是靠这个标记穿过了时效过滤；
   - Serper/Tavily 搜索补 CVPR/ECCV Workshop、CCF 赛事；NTIRE/MIPI 策展页兜底。
 - **赛道范围**：不限于底层视觉，覆盖 CV / 深度学习 / 大模型 / 具身 / 多模态 / AI for Science。`competitions.keywords`（core/boost/weak 三档）只在打分阶段叠加权重，不做硬过滤——底层视觉的赛事数量撑不起日更，泛 AI 赛事里反而更容易挑到有方法论的题。
-- **强实时性过滤**：`filter_active` 丢掉已过截止、超出 120 天窗口、无任何时间线索的条目；`registration_closed()` 用双证据判报名状态——命中「报名已结束/已截止」等状态词即关，否则取文本里最早的「报名截止 <日期>」，已过即关。**只看「决赛在未来」不算还能报名**（实测天池踩过的坑：报名 10-26 已闭、决赛 11-16 仍未到）。
+- **强实时性过滤（时效闸门，`app/filters/recency.py`）**：**过期赛事一票否决**。判据按优先级：①`extra.deadline`/`end` 早于此刻 → 过期；②正文里「截止 <日期>」或「报名已结束/获奖名单」且无未来节点 → 过期；③没有任何未来日期且最后一条时间证据旧于 `stale_days`(120) → 过期，旧于 `history_days`(730) → 历史老赛事；④无任何日期线索且没有接口级「在办」标记 → 剔除。**`evergreen`（FlyAI 那类「长期开放练习赛」）不再算在办证明**——它正是 2019 年赛事混进成稿的那条缝。闸门架在**所有源汇合之后**（`sources.collect`），因为 FlyAI / 雷达 / ML Contests 是独立源，只在汇合点才与 `competitions.fetch()` 的条目同池；`filter_active` 复用它，额外负责练习赛降权。`parse_deadline` 的年份下限已放宽到「今年 −15」：老日期必须能解析出来，才能被判「已过期」，否则会退化成「无截止线索」而放行。
+- **报名状态判定**：`registration_closed()` 用双证据判报名状态——命中「报名已结束/已截止」等状态词即关，否则取文本里最早的「报名截止 <日期>」，已过即关。**只看「决赛在未来」不算还能报名**（实测天池踩过的坑：报名 10-26 已闭、决赛 11-16 仍未到）。
+- **官方页二次判定**：`fetch_contest_detail` 拿到页面后**重新**做一次时效判定（此时证据最全：正文、时间线、报名状态），过期即顺延下一候选；**候选全部过期时直接 `PipelineError`，本期不出稿**——写一篇过期赛事比停更一期更伤账号。报名已关但赛程仍在的场次仍可写「赛题拆解 + 复盘」，两者是不同分支，别混在一起。
+- **成稿侧兜底**：`recency.stale_claims(spec)` 扫一遍正文/信息卡/表格里「截止 …」的日期，发现已过去的节点就在日志里点名，交人工复核（只报不改，误删正文的代价更大）。
 - **页面倒计时优先**（`registration_status`）：天池在报名开着时会渲染「报名剩 03 日 14 时」，而同一页的「2026-05-31 报名与资格赛结束」讲的是**资格赛阶段**。带计数的倒计时一旦出现就直接判「报名开着」（「立即报名」这种按钮文案不算证据），并作为 `registration_hint` 原句进素材与卡片「报名」行——否则模型会把资格赛结束写成「报名已结束」。
 - **质量门槛**：奖金为 Kudos/积分且队伍 < 200 的 Kaggle 课堂练习赛直接丢弃——它们以 18.9 的高分霸榜，会挤掉真赛事；真金白银 +2 分，队伍 ≥200 +1.5 分。
-- **单场精读（核心变化）**：**一期只写一场赛事**。pipeline 先取 5 条候选，逐条抓官方详情页核验报名状态，遇 `registration_closed` 顺延；全截止则取最高分那场并切到「赛题拆解 + 复盘」视角。最终 `selected = [chosen]`，禁止一篇推文盘点多场比赛。
+- **单场精读（核心变化）**：**一期只写一场赛事**。pipeline 先取 5 条候选，逐条抓官方详情页核验：**过期 → 一票否决并顺延**；`registration_closed`（报名关但赛程在）→ 先记下，全部顺延完仍无可用场次时挑一场切到「赛题拆解 + 复盘」视角；**候选全过期则直接失败**，不拿旧比赛凑数。最终 `selected = [chosen]`，禁止一篇推文盘点多场比赛。
 - **七个维度**：赛事背景 / 赛事任务 / 数据说明 / 评估指标 / 赛事周期 / 奖项设置 / 专业解题思路与 Baseline 引导；其中破局思路（Grandmaster 视角）篇幅不少于三成。**缺失字段一律写「待官方公布」，绝不编造。**
 - **官方详情页抓取**（`competitions.fetch_contest_detail`）：普通请求 → 静态文本 <1200 字则走无头渲染兜底；产出 `official_brief`（官方赛题正文 3500 字）/ `page_excerpt`（2000 字）/ `timeline` / `prize_hint` / `metrics_hint` / `registration_closed`，一并塞进 LLM 素材。
 - **信息卡**：按行内容自适应 `COMPETITION INFO`（赛事名/主办/赛题方向/报名状态/奖金池/时间节点/入口）或 `EVENT SNAPSHOT`（复盘视角下的关键节点快照）。
@@ -313,7 +316,7 @@ challenge report：赛题定义、数据规格、评测协议、完整榜单、�
 python -m unittest discover -s tests -v
 ```
 
-覆盖（484 例）：lowlevelcv 解析器（用真实页面夹具）、评分与筛选、JSON 修复、Spec 校验、微信渲染（内联样式/转义/内联语法）、Markdown 导出、图片格式归一、四个赛事源的解析与蜜罐识别、报名状态判定与练习赛门槛、赛事/业界封面选图、标题自审、观点内化、发布属性断言、业界「事件级查重 / 同批合并 / 主题纯粹性清洗 / 数字核对」（`tests/test_industry_focus.py`）、指定论文检索的「标题匹配 / 多源合并 / JATS 表格 / 图注区域渲染 / 单元格校验 / Sci-Hub 合规默认」（`tests/test_paper_search.py`）、以及人工润色链路的「Markdown 反解 / 图表保全 / 落库版本 / 推送取最新版与发布属性」（`tests/test_md_edit.py`）。
+覆盖（508 例）：lowlevelcv 解析器（用真实页面夹具）、评分与筛选、JSON 修复、Spec 校验、微信渲染（内联样式/转义/内联语法）、Markdown 导出、图片格式归一、四个赛事源的解析与蜜罐识别、报名状态判定与练习赛门槛、赛事/业界封面选图、标题自审、观点内化、发布属性断言、业界「事件级查重 / 同批合并 / 主题纯粹性清洗 / 数字核对」（`tests/test_industry_focus.py`）、指定论文检索的「标题匹配 / 多源合并 / JATS 表格 / 图注区域渲染 / 单元格校验 / Sci-Hub 合规默认」（`tests/test_paper_search.py`）、人工润色链路的「Markdown 反解 / 图表保全 / 落库版本 / 推送取最新版与发布属性」（`tests/test_md_edit.py`）、以及赛事时效闸门的「老日期解析 / 过期一票否决 / 历史年份 / 超窗 / 无时效证据 / 官方页二次判定 / 候选全过期不出稿」（`tests/test_contest_recency.py`）。
 
 ## 9. 部署建议
 
@@ -331,6 +334,7 @@ python -m unittest discover -s tests -v
 - 本机实测（2026-10 网络环境）：`openai.com/news/rss.xml`、`bair.berkeley.edu`、`api.github.com` 可访问；`jiqizhixin.com`、`huggingface.co`、`research.google` 及 RSSHub 公共实例被代理拦截（502）。这类地域性差异应通过 `/api/sources` 的体检结果确认，不要凭代码假设；
 - 草稿箱接口要求认证订阅号/服务号；未认证账号请用预览页的「复制 Markdown」或「复制富文本」手动粘贴。
 - 赛事源的时效性天然衰减快：雷达条目里 `signup=closed` 的直接丢，但「报名已结束」常常只写在详情页正文里，所以精读前必须逐条抓官方页核验（`fetch_contest_detail`），这一步单条约 3–8 秒；候选全部截止时会退化成复盘稿，而非硬凑一场。
+- 时效闸门的边界（2026-11-11 定稿）：①**没有任何日期、只靠接口在办标记**放行的条目（DataCastle / Codabench 列表接口）判据最弱，会在日志里标 `verified=false`，真正的把关发生在 `fetch_contest_detail` 二次判定——官方页被反爬或超时时，这一条按源标记放行，宁可漏杀也不误杀正常场次；②阈值可调：`competitions.filter.upcoming_days`（推荐窗口 120 天）/ `stale_days`（无未来日期时的时间证据陈旧度 120 天）/ `history_days`（历史老赛事 730 天），收紧 `history_days` 即可把「去年场次」也挡在外面；③闸门只认「日期证据」，不认赛事名气与奖金——高奖金的历史赛事照样否决，这是刻意为之。验证脚本 `scripts/verify_contest_recency.py`（`--offline` 只跑 2019 FlyAI 回归用例）。
 - FlyAI 主站上瑞数（验证码 + 动态 JS），无头浏览器同样被拦，只走静态镜像；镜像更新有延迟，新赛事可能晚几天出现。
 - Codabench 对无 `User-Agent` 的直连返回蜜罐页（《1984》随机段落、状态码 200），必须靠 `looks_like_honeypot` 识别后转无头渲染，否则会把小说段落当赛题喂给模型。
 - 封面图（`app/render/cover_select.py`）只从「本条素材自己的页面」取图，三模块策略不同：论文走 arXiv HTML → PDF 抠图（teaser/架构/对比图）→ 列表页缩略图；业界走仓库 README（raw 被掐时自动换 gcore.jsdelivr 镜像）→ 项目官网 og:image；赛事只认官方视觉 / 数据集样例 / baseline 框架图，**分数不到阈值就退品牌底图，绝不硬凑**。所有候选过体检（尺寸 / 比例 / 空白图 / badge 头像），logo 走 contain 版式不裁切。**封面只出本期主角素材**（一期选 4 条时，绝不借第 3 条的配图当封面——文章写 A、封面是 B 是硬伤）；主角没有合格图就退品牌底图。阈值与画布尺寸在 `topics.yaml` 的 `cover:` 段可调。

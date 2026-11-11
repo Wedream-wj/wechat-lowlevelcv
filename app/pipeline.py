@@ -17,6 +17,7 @@ from typing import Callable
 from . import db
 from .config import settings, topics
 from .filters import events as event_dedupe
+from .filters import recency
 from .filters import scoring
 from .llm.client import LLMClient, LLMError
 from .llm.prompts import (
@@ -619,6 +620,8 @@ async def run_module(module: str, *, publish: bool | None = None,
             if module == "contest" and variant != "baseline" and selected:
                 report("配图", 44, "核验赛事官方页面（时效与赛题细节）…", True)
                 chosen = None
+                closed_live: list = []      # 报名已关但赛程仍在 → 可写「赛题拆解 + 复盘」
+                vetoed: list[tuple] = []    # 明确过期 / 历史老赛事 → 一票否决，绝不回退
                 for cand in selected[:5]:
                     try:
                         detail = await asyncio.wait_for(
@@ -628,24 +631,42 @@ async def run_module(module: str, *, publish: bool | None = None,
                     except Exception as exc:
                         detail = {"fetched": False, "error": f"{type(exc).__name__}: {exc}"}
                     cand.extra["contest_detail"] = detail
+                    # 拿到官方页后**重新**做一次时效判定：此时证据最全（页面正文、
+                    # 时间线、报名状态都在手），比抓取阶段的初判更可信。
+                    verdict = recency.evaluate(cand, detail=detail)
+                    if not verdict.ok:
+                        vetoed.append((cand, verdict))
+                        _log(f"时效否决：{cand.title[:26]} —— {verdict.reason}，顺延下一候选")
+                        continue
                     if detail.get("registration_closed"):
+                        closed_live.append(cand)
                         _log(f"核验：{cand.title[:28]} 官方页显示报名已截止，顺延下一候选")
                         continue
                     chosen = cand
-                    _log(f"核验通过：{cand.title[:28]}（页面 {len(detail.get('page_excerpt') or '')} 字，"
+                    _log(f"核验通过：{cand.title[:28]}（{verdict.reason}；"
+                         f"页面 {len(detail.get('page_excerpt') or '')} 字，"
                          f"时间线 {len(detail.get('timeline') or [])} 条，"
                          f"指标依据 {len(detail.get('metrics_hint') or [])} 条）")
                     break
-                if chosen is None:
-                    # 候选全是「报名已截止但赛程仍在」的场次：仍然成稿，但改成复盘视角
+                if chosen is None and closed_live:
+                    # 报名已关但赛程仍在：仍然成稿，但改成复盘视角
                     # （Prompt 会读 registration_closed 关掉报名入口与倒计时），不开天窗也不误导
-                    chosen = selected[0]
+                    chosen = closed_live[0]
                     chosen.extra.setdefault("contest_detail", {})["registration_closed"] = True
                     # days_left 是按 extra.deadline 算的，而天池这类页面的 deadline 常是
                     # 「整体比赛结束」，不是报名截止。报名已关时留着它，模型会写出
                     # 「3 天报名倒计时」这种与正文自相矛盾的标题，直接摘掉。
                     chosen.extra.pop("days_left", None)
                     _log("核验：候选报名均已截止，改为「赛题拆解 + 复盘」视角撰写")
+                if chosen is None:
+                    # 全部候选都被时效闸门否决：**不开天窗也不将就**。
+                    # 写一篇过期赛事比停更一期更伤账号——这里必须显式失败并说清原因。
+                    detail_txt = "；".join(f"{c.title[:24]}（{v.reason}）" for c, v in vetoed[:3])
+                    raise PipelineError(
+                        f"时效闸门：{len(vetoed)} 场候选赛事全部过期或无法证明仍在办，本期不出稿。"
+                        f"明细：{detail_txt}。请稍后重试（新赛季通常在工作日上架），"
+                        "或在 config/topics.yaml 复核 competitions.filter.upcoming_days。"
+                    )
                 selected = [chosen]
                 _log(f"单场精读选题：{chosen.title[:40]}（{chosen.score} 分）")
             figures = await build_figures(client, selected, module)
@@ -876,6 +897,13 @@ async def run_module(module: str, *, publish: bool | None = None,
             # 要素齐全但读者读不出「这场比赛考什么」。自审不过 → 定向重写一次（只重出
             # 标题，几十 token）→ 仍不过则退回确定性兜底（删空洞修饰 / 公式化重拼）。
             await _sanity_check_contest_title(spec, selected[0], llm, _log)
+            # 时效自检（最后一道）：素材已被闸门保证未过期，这里防的是模型把年份写错
+            # ——把 2026 的截止日写成 2024，读者一算就知道是旧闻。只提示不删改：
+            # 误删正文的代价大于留一句可复核的日志。
+            stale = recency.stale_claims(spec)
+            if stale:
+                _log(f"时效自检：正文出现 {len(stale)} 处已过去的节点日期，请复核 —— "
+                     + "；".join(stale[:2]))
         # 业界标题自审：产业稿的标题问题不是黑话而是「绕」——「把 X 从 A 到 B 里解出来」
         # 这类句式读者要读两遍。自审不过先让模型只重出标题，仍不过就退回素材原题。
         if module == "industry" and selected:
