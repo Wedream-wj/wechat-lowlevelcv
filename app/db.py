@@ -344,6 +344,80 @@ def list_articles(module: str | None = None, limit: int = 30) -> list[dict]:
         return [dict(r) for r in conn.execute(sql, args).fetchall()]
 
 
+# 板块中文名 ↔ 代码：搜索「学术论文」要能命中 module='paper' 的全部稿件
+MODULE_LABELS = {"学术论文": "paper", "业界进展": "industry", "赛事竞赛": "contest"}
+
+_LIST_COLS = ("issue_id, module, title, digest, created_at, status, wx_media_id, rev, edited_at")
+
+
+def _snippet(markdown: str, needle: str, width: int = 48) -> str:
+    """命中的正文片段（前后各取一段），供列表展示命中上下文。"""
+    text = (markdown or "").replace("\n", " ").replace("|", " ")
+    low, qlow = text.lower(), needle.lower()
+    pos = low.find(qlow)
+    if pos < 0:
+        return ""
+    start = max(pos - width, 0)
+    end = min(pos + len(needle) + width, len(text))
+    return ("…" if start > 0 else "") + text[start:end].strip() + ("…" if end < len(text) else "")
+
+
+def search_articles(query: str = "", module: str | None = None,
+                    page: int = 1, page_size: int = 20) -> dict:
+    """历史出稿：全量扫描 + 分页 + 不区分大小写的模糊检索。
+
+    检索范围：公众号标题、摘要（digest）、正文 Markdown、条目原始列表（含论文原名 /
+    来源 / 会场）、期号，以及**板块中文名**（「学术论文 / 业界进展 / 赛事竞赛」）。
+    SQLite 的 LIKE 对 ASCII 本身不区分大小写，中文按子串匹配。
+    """
+    try:
+        page = max(int(page or 1), 1)
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        page_size = min(max(int(page_size or 20), 1), 200)
+    except (TypeError, ValueError):
+        page_size = 20
+
+    where: list[str] = []
+    args: list = []
+    if module:
+        where.append("module=?")
+        args.append(module)
+    q = (query or "").strip()
+    if q:
+        like = f"%{q}%"
+        clause = ["title LIKE ?", "digest LIKE ?", "markdown LIKE ?",
+                  "items_json LIKE ?", "issue_id LIKE ?"]
+        args.extend([like] * 5)
+        mods = [code for label, code in MODULE_LABELS.items()
+                if q.lower() in label.lower() or q.lower() in code]
+        if mods:
+            clause.append("module IN (%s)" % ",".join("?" * len(mods)))
+            args.extend(mods)
+        where.append("(" + " OR ".join(clause) + ")")
+    sql_where = (" WHERE " + " AND ".join(where)) if where else ""
+
+    with connect() as conn:
+        total = int(conn.execute(f"SELECT COUNT(*) AS c FROM issues{sql_where}",
+                                 args).fetchone()["c"])
+        pages = max((total + page_size - 1) // page_size, 1)
+        page = min(page, pages)
+        rows = conn.execute(
+            f"SELECT {_LIST_COLS}, markdown FROM issues{sql_where} "
+            "ORDER BY created_at DESC, issue_id DESC LIMIT ? OFFSET ?",
+            [*args, page_size, (page - 1) * page_size],
+        ).fetchall()
+        items = []
+        for r in rows:
+            row = dict(r)
+            body = row.pop("markdown", "") or ""  # 正文只在服务端算片段，不整篇下发给列表
+            row["snippet"] = _snippet(body, q) if q else ""
+            items.append(row)
+    return {"items": items, "total": total, "page": page,
+            "page_size": page_size, "pages": pages, "query": q}
+
+
 # ------------------------------------------------------------------ runs
 def log_run(module: str, status: str, detail: str, run_id: str | None = None,
             started_at: str | None = None) -> str:

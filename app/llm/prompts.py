@@ -19,6 +19,7 @@ from ..spec_tools import (
     MAX_TABLE_COLS,
     abbrev_title_venue,
     compact_tables,
+    is_preprint_venue,
     venue_abbrev,
     venue_short_label,
 )
@@ -254,6 +255,11 @@ PAPER_PROMPT = """
    差值必须拿表里两个数逐位现算），
    代价是什么。正文合计至少引用 3 个来自 tables 或 result_snippets 的具体数字。
    **禁止自己另拼一张表**：表格里每个数字都必须来自素材 tables，素材没有的数字一个都不许写。
+   **行列对齐铁律（数据对齐契约）**：呈现的 table 必须与素材 tables 的某一张保持
+   行列一一对应——表头指标、方法名（Baseline vs. SOTA vs. Ours）与数值的横纵位置
+   逐格照抄；禁止移动、交换、重排任何单元格，禁止把 A 行的数值对到 B 行。允许的
+   裁剪只有两种：整列裁掉非核心指标列、精选有代表性的方法行（Baseline / SOTA /
+   Ours 必须在场）；保留下来的行与列必须保持素材原表的原有顺序与位置关系。
    素材里有第二张 figure（结果对比图）时引用它，图注写「图 X：…」。
    **禁止**出现「素材未提供具体数值」「无法量化」「表格数据缺失」这类内部说明；
    也**禁止**交代素材的排版状况（「行列对齐存在错位」「按单元格原值呈现」「不做重排」）——
@@ -848,7 +854,33 @@ TARGETED_PAPER_RULES = """
 5. 元叙述沿用全局禁令：「经检索」「素材来自」「网络显示」等交代检索过程的句子一律禁止。
 """
 
-MODULE_TITLE = {"paper": "论文精读", "industry": "业界观察", "contest": "赛事速递"}
+PAPER_FOCUS_RULES = """
+【目标论文锁定（最高优先级，违反判整篇不合格）】
+本期只精读 `target_paper` 这一篇。正文（标题、副标题、导读、01–05 各节）只能讲它，
+`materials` 里其它条目只是同批候选，**不得**成为正文主体，**更不得**用来填信息卡。
+PAPER INFO 三行必须逐字照抄 `target_paper`，一个字都不许改、不许润色、不许缩写：
+- 论文名称 = target_paper.title（英文原标题原样）
+- 发表期刊/会议 = target_paper.venue_label（全称 + 简称的写法已在字段里给好，直接照抄）
+- 作者团队 = 「由 」+ target_paper.authors 里前 6 位人名（用「、」连接）+「 等研究人员共同完成」，
+  顺序与人名拼写必须与字段完全一致，**严禁**增删、音译、替换成别篇论文的作者
+- target_paper 里为空的字段：该行整行省略，**严禁**从别的候选或常识里补人名、补会议、
+  补研究机构——宁可少一行，也绝不编造。信息卡里已有的「研究机构 / 开源代码」若来自
+  别的候选论文，必须删除。
+自检一遍再输出：信息卡里出现的论文代号（如 DeLang-SR / MUTE）必须与正文各节讲的方法代号一致。
+"""
+
+MODULE_TITLE = {"paper": "论文精读", "industry": "业界观察", "contest": "赛事速递"}# 人机协作润色纪律（最小改动与精准响应）：成稿后的任何 AI 修订（重试、按反馈重写）
+# 都必须遵守；编辑器的 AI 协作能力未来也复用这段铁律。
+EDIT_COLLAB_RULES = (
+    "【人机协作润色纪律（最小改动与精准响应，违反判整篇不合格）】\n"
+    "1. 只改指定位置：只针对明确要求修改的地方做精准重写，绝不趁机重写无关段落、\n"
+    "   调整其它小节的结构或措辞、增删没被点名的内容。\n"
+    "2. 人工意图至上：稿子里已有的表述（尤其经过多轮润色确认过的文字）是最高优先级\n"
+    "   事实源，不得回滚、覆盖或「顺手优化」。\n"
+    "3. 表格数据零失真：没被点名的表格必须逐字保持原样；被点名的表格也只允许整列裁剪，\n"
+    "   禁止移动、交换任何单元格的行列位置。"
+)
+
 # 素材里有数字、成稿却没引用时的补写要求（见 thin_evidence 判定）
 QUANT_RETRY = (
     "这一稿的实验解读缺少数值证据，读起来没有说服力。请保持原有的结构、标题与已写的分析，"
@@ -857,7 +889,9 @@ QUANT_RETRY = (
     "2) 正文合计引用至少 3 个来自 tables 或 result_snippets 的具体数字，并写出比较差值\n"
     "   （例如「PSNR 25.26 vs 24.64，高 0.62 dB」「LPIPS 0.1253 对比 0.1382 更低」）；\n"
     "3) 点名最先进的方法（SOTA）与它的指标，写清领先/落后多少，以及参数量、推理开销的代价；\n"
-    "4) 删除「素材未提供具体数值」「无法量化」这类内部说明。数字只能来自素材，不得编造。"
+    "4) 删除「素材未提供具体数值」「无法量化」这类内部说明。数字只能来自素材，不得编造。\n"
+    "5) 除上述两节外，导语、信息卡与其它小节一字不许动；表格按行列对齐铁律逐格照抄素材。\n"
+    + EDIT_COLLAB_RULES
 )
 
 # 素材里一个实验数字都没有时的补写要求：此时任何指标表都是编的
@@ -1245,17 +1279,26 @@ def enforce_title_rules(spec: dict, module: str, items: list | None = None) -> b
         token = label.split()[0] if label else ""
         present = bool(token) and re.search(
             rf"(?<![A-Za-z]){re.escape(token)}(?![A-Za-z])", title) is not None
-        if pub.get("accepted") and label and not present:
+        if is_preprint_venue(venue):
+            # 预印本（含 OpenAlex 的「arXiv (Cornell University)」托管方串）：
+            # 标题里任何 venue 前缀都是假的，直接剥掉——放在 accepted 分支之前，
+            # 否则「accepted 被误标为 True」时这条永远走不到
+            stripped = strip_title_venue_prefix(title)
+            if stripped and stripped != title:
+                spec["title"] = stripped
+                changed = True
+        elif pub.get("accepted") and label and not present:
             # 已正式收录：剥掉开头错误/编造的 venue 标签，换上查证过的简称
             stripped = re.sub(
                 r"^\s*(?:【[^】]{0,24}】|[A-Za-z][A-Za-z/ &]{0,20}\s*20\d{2}\s*[|｜：:]?\s*)",
                 "", title)
             spec["title"] = f"{label} | {stripped}"
             changed = True
-        elif pub.get("accepted") is False:
-            # 检索确认仅预印本：标题里的任何 venue 前缀都是编造的（模型给预印本
-            # 贴 CVPR/ICML 标签比漏写更伤信誉），剥掉
-            stripped = _TITLE_VENUE_PREFIX_RE.sub("", title).strip()
+        elif pub.get("accepted") is False or is_preprint_venue(venue):
+            # 仅预印本（或被检索确认未收录）：标题里的任何 venue 前缀都是编造的
+            # （模型给预印本贴 CVPR/ICML 标签比漏写更伤信誉），连同
+            # 「arXiv (Cornell University) 2026 |」这种托管方串一并剥掉
+            stripped = strip_title_venue_prefix(title)
             if stripped and stripped != title:
                 spec["title"] = stripped
                 changed = True
@@ -1429,6 +1472,24 @@ def _featured_item(spec_title: str, items: list):
 
 _TITLE_VENUE_PREFIX_RE = re.compile(
     r"^\s*(?:【[^】]{0,24}】|[A-Za-z][A-Za-z/ &]{0,20}\s*20\d{2}\s*[|｜：:]?\s*)")
+
+# 「arXiv (Cornell University) 2026 | 标题」这类托管方前缀：分隔符前那段没有中文、
+# 长度不超过 40 且含年份或 arXiv 字样，就整段判为 venue 标签剥掉
+_TITLE_PREFIX_SPLIT_RE = re.compile(r"^\s*([^|｜]{1,40}?)\s*[|｜]\s*(.+)$")
+
+
+def strip_title_venue_prefix(title: str) -> str:
+    """剥掉标题开头的 venue 标签（预印本场景用），保留标题本体。"""
+    raw = str(title or "").strip()
+    m = _TITLE_PREFIX_SPLIT_RE.match(raw)
+    if m:
+        head, body = m.group(1).strip(), m.group(2).strip()
+        looks_venue = (not re.search(r"[\u4e00-\u9fa5]", head)
+                       and (bool(re.search(r"20\d{2}", head)) or "arxiv" in head.lower()
+                            or len(head.split()) <= 4))
+        if looks_venue and body:
+            raw = body
+    return _TITLE_VENUE_PREFIX_RE.sub("", raw).strip()
 
 
 def title_is_number_led(spec: dict) -> bool:
@@ -1916,8 +1977,12 @@ def _item_payload(index: int, item, figure_ids: list[str]) -> dict:
 
 
 def build_user_prompt(module: str, items: list, figures: dict[str, dict], date_str: str,
-                      variant: str | None = None) -> str:
-    """把素材整理成模型友好的 JSON，附带图片编号表。variant 用于模块内成稿变体。"""
+                      variant: str | None = None, focus=None) -> str:
+    """把素材整理成模型友好的 JSON，附带图片编号表。
+
+    variant 用于模块内成稿变体；focus 是论文稿的「本期唯一权威信源」——单列成
+    `target_paper` 字段并追加锁定铁律，避免模型在同一批候选里串台（元信息张冠李戴）。
+    """
     import json
 
     material = []
@@ -1938,6 +2003,21 @@ def build_user_prompt(module: str, items: list, figures: dict[str, dict], date_s
         "materials": material,
         "figures": figure_table,
     }
+    # 论文稿：把目标论文的元信息单列成权威字段（口径与信息卡绑定完全一致）
+    if module == "paper" and focus is not None:
+        from ..spec_tools import paper_meta_values
+
+        values = paper_meta_values(focus)
+        payload["target_paper"] = {
+            "title": values.get("论文名称", ""),
+            "venue_label": values.get("发表期刊/会议", ""),
+            "authors": list((getattr(focus, "authors", None) or [])[:6]),
+            "authors_line": values.get("作者团队", ""),
+            "code_url": getattr(focus, "code_url", ""),
+            "reference": next((m["id"] for m in material
+                               if m.get("title") == getattr(focus, "title", "")), ""),
+            "rule": "信息卡三行与正文主体只能来自本对象，严禁引用 materials 里的其它论文",
+        }
     prompt_key = f"{module}_{variant}" if (module == "contest" and variant == "baseline") else module
     # baseline 精读有两种素材：Datawhale 的复现仓库 → 讲代码起点；
     # NTIRE 官方报告 → 讲赛道定义与冠军方案。两者结构完全不同，不能共用一套 Prompt。
@@ -1949,6 +2029,8 @@ def build_user_prompt(module: str, items: list, figures: dict[str, dict], date_s
     if prompt_key == "paper" and any(
             m.get("targeted") for m in material if isinstance(m, dict)):
         prompt_text += TARGETED_PAPER_RULES
+    if prompt_key == "paper" and payload.get("target_paper"):
+        prompt_text += PAPER_FOCUS_RULES
     return (
         prompt_text
         + "\n\n【本期素材】\n"

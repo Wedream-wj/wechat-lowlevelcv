@@ -357,13 +357,15 @@ class LLMClient:
 
     async def write(self, module: str, items: list[Item], figures: dict[str, dict], date_str: str,
                     on_progress: Callable[[str, int], None] | None = None,
-                    extra_instruction: str = "", variant: str | None = None) -> dict:
+                    extra_instruction: str = "", variant: str | None = None,
+                    focus: Item | None = None) -> dict:
         if not self.enabled:
             from .mock import mock_spec
 
             return mock_spec(module, items, figures, variant=variant)
 
-        user_prompt = build_user_prompt(module, items, figures, date_str, variant=variant)
+        user_prompt = build_user_prompt(module, items, figures, date_str, variant=variant,
+                                        focus=focus)
         if extra_instruction:
             user_prompt += "\n\n【本次必须修正】\n" + extra_instruction
         messages = [

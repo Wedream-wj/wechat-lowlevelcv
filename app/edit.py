@@ -29,6 +29,79 @@ from .sources import MODULE_LABEL
 MAX_MARKDOWN = 200_000  # 一期推文 1 万字级别，20 万字符足够挡住误粘贴的整本书
 
 
+# ---------------------------------------------------------------- 协作纪律（最小改动与数据对齐）
+def _table_blocks(spec: dict) -> list[dict]:
+    return [b for b in spec.get("sections") or []
+            if isinstance(b, dict) and b.get("type") == "table"]
+
+
+def assert_tables_stable(spec: dict, figures: dict) -> None:
+    """表格不变量（数据对齐契约的保存侧闸门）：排版往返绝不失真。
+
+    md → spec →（spec_to_markdown）→ md → spec 的两轮解析里，每张表的
+    表头、行数、每格内容必须逐字一致。不一致只可能是两种情况：
+    单元格里出现了未转义的「|」（列会当场错位），或渲染链路悄悄改写了
+    表格数据——两种都按契约拒绝保存，把错位挡在入库之前。
+    """
+    from .render.markdown import spec_to_markdown
+
+    tables = _table_blocks(spec)
+    if not tables:
+        return
+    # 行列等宽校验：某行比表头多/少一格 = 有未转义的「|」或断行混进来了，
+    # 这正是「表格错位」的直接特征，在入库前就拦下
+    for idx, table in enumerate(tables, start=1):
+        width = len(table.get("header") or [])
+        for r_i, row in enumerate(table.get("rows") or [], start=2):
+            if len(row) != width:
+                raise ValueError(
+                    f"第 {idx} 张表格第 {r_i} 行有 {len(row)} 格，与表头 {width} 列不一致"
+                    "（通常是有未转义的「|」混进了单元格），已按数据对齐契约拒绝保存；"
+                    "请把正文里的竖线改写为「\\|」或直接删除。")
+    try:
+        spec2, _ = parse_markdown(spec_to_markdown(spec, figures))
+        tables2 = _table_blocks(spec2)
+    except Exception as exc:  # 往返自身崩溃 = 渲染链路有问题，同样拒绝保存
+        raise ValueError(f"表格数据在排版往返中解析失败，已拒绝保存：{exc}") from exc
+    for idx, (a, b) in enumerate(zip(tables, tables2), start=1):
+        if a.get("header") != b.get("header") or a.get("rows") != b.get("rows"):
+            raise ValueError(
+                f"第 {idx} 张表格在排版往返中发生了数据变化（行列错位或未转义的「|」），"
+                "已按数据对齐契约拒绝保存：请检查该表的竖线是否都需要转义为「\\|」。")
+
+
+def changed_scope(old_markdown: str, new_markdown: str) -> dict:
+    """人机协作审计：两版稿子之间改了什么（块级 diff + 表格级 diff）。
+
+    「只改指定位置」纪律的可校验形态：润色（无论人手改还是 AI 改）之后，
+    据此核对改动是否落在用户点名的范围——没被点名的表格必须逐字原样。
+    """
+    from itertools import zip_longest
+
+    old_blocks = [b for b in _parse_for_audit(old_markdown).get("sections") or []
+                  if isinstance(b, dict)]
+    new_blocks = [b for b in _parse_for_audit(new_markdown).get("sections") or []
+                  if isinstance(b, dict)]
+    old_tables = [b for b in old_blocks if b.get("type") == "table"]
+    new_tables = [b for b in new_blocks if b.get("type") == "table"]
+    return {
+        "total_blocks": max(len(old_blocks), len(new_blocks)),
+        "changed_blocks": sum(1 for a, b in zip_longest(old_blocks, new_blocks) if a != b),
+        "total_tables": max(len(old_tables), len(new_tables)),
+        "tables_changed": [i for i, (a, b) in
+                           enumerate(zip_longest(old_tables, new_tables), start=1)
+                           if a != b],
+    }
+
+
+def _parse_for_audit(markdown: str) -> dict:
+    text = (markdown or "").replace("\r\n", "\n").strip()
+    if not text:
+        return {}
+    spec, _figures = parse_markdown(text + "\n")
+    return spec
+
+
 @dataclass
 class EditResult:
     issue_id: str
@@ -101,6 +174,7 @@ def render_edit(article: Article, markdown: str) -> EditResult:
     if len(text) > MAX_MARKDOWN:
         raise ValueError(f"Markdown 超过 {MAX_MARKDOWN} 字符上限，请分批整理")
     spec, figures = parse_markdown(text + "\n")
+    assert_tables_stable(spec, figures)  # 数据对齐契约：错位的表进不了库
     body = wechat.render_body(spec, figures, article.module, _date_str(article))
     return EditResult(issue_id=article.issue_id, html=body, markdown=text + "\n",
                       spec=spec, figures=figures)

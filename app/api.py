@@ -221,8 +221,25 @@ async def job(job_id: str) -> dict:
 
 
 @app.get("/api/issues")
-async def issues(module: str | None = None, limit: int = 30) -> list[dict]:
-    return db.list_articles(module, limit)
+async def issues(module: str | None = None, query: str = "", page: int = 1,
+                 page_size: int = 20, limit: int | None = None) -> dict:
+    """历史出稿：全量存档 + 分页 + 模糊检索。
+
+    - `page` / `page_size`：分页（默认 1 / 20，page_size 上限 200）
+    - `query`：模糊匹配标题 / 摘要 / 正文 / 论文原名 / 板块中文名，不区分大小写
+    - `limit`：兼容旧调用（等价于 page_size，page 恒为 1）
+    返回 `{items, total, page, page_size, pages, query}`。
+    """
+    if limit is not None and page_size == 20:
+        page_size = limit
+        page = 1
+    return db.search_articles(query=query, module=module, page=page, page_size=page_size)
+
+
+@app.get("/api/issues/all")
+async def issues_all(module: str | None = None) -> list[dict]:
+    """一次性取全部存档（导出 / 备份用），不分页。"""
+    return db.list_articles(module=module, limit=100000)
 
 
 @app.get("/api/issues/{issue_id}")

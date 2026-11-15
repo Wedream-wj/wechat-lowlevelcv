@@ -157,6 +157,8 @@ wechat-lowlevelcv/
 
 - **数据源**：`lowlevelcv.com/papers-selection`（最新 3 页，含分类/摘要/示意图/代码链接，`?current=N` 翻页）；arXiv API（`cat:cs.CV` + 关键词，按提交时间倒序）；Papers With Code（API 不稳定，静默降级）。
 - **指定论文名称检索成稿**（2026-11-03 新增）：控制台论文卡片的「按论文名精读」输入框 / `python -m scripts.demo paper --query "<论文名>"` / `POST /api/run/paper {"query": "..."}`。链路（`sources/paper_search.py`）：**OpenAlex → Crossref → Europe PMC → Semantic Scholar → Google Scholar → ScienceDirect → IEEE Xplore** 七路并发，各自留 trace（成功/被反爬/超时都点名）；归一化标题相似度（SequenceMatcher + 词级 Jaccard）≥ 0.72 才算命中——宁可报「未找到」，绝不把同领域的相似标题论文当成目标；多源记录按 DOI/标题合并（OpenAlex 元数据最全、Crossref 期刊名最权威，只补缺不覆盖）。全文链：OA pdf → 出版商 DOI 落地页 `citation_pdf_url` → Semantic Scholar OA 镜像（`.env` 配 `S2_API_KEY` 走独立配额，匿名池实测长期 429）→ **Sci-Hub 默认禁用**（`academic.paper_search.scihub_enabled`，镜像分发未授权副本，默认只在开放获取/授权渠道内工作）。素材提取（`sources/paper_pdf.py`）双通道：Europe PMC 全文 XML 给干净表格（含「IoU 分组 × R/P/F1」两行表头的自动合并 `R@0.5`）、数值结论句与 32000 字全文；PDF 只干「按图注区域整块渲染插图」——架构图/流程图常由几十个图块拼成，取图注上方位图+矢量绘图并集以 2.5x+ 缩放整块渲染（`Flowchart/architecture` 判 arch，定性示例判 result），表格若走 PDF 通道必须过单元格合理性校验（竖排断行如「8409\n.」整表判废，宁缺毋假）。成稿 100% 继承论文模块全套规范：venue 信誉规则（Crossref 核实的期刊名上标题）、数字逐字核对、总结纯粹性、推草稿「文字原创 + 每日推送」。同名指标（含中文指标名→英文表头）的跨表差值已加入数字核对白名单（`_METRIC_ALIASES`），「精确率 80.22→84.00，提高 3.78」不再误判为编造，跨指标蒙差值（PSNR 差冒充 MUSIQ 差）仍然拦截。
+- **元信息原子绑定（2026-11-15 事故修复）**：`filters/grounding.py`。事故原型是《NEURIPS 2026 | DeLang-SR》一期——正文精读 DeLang-SR，信息卡的**论文名称与作者却是同批第一篇 MUTE 的**。根因三层：①组稿时没有「本期就写这一篇」的硬绑定；②元信息兜底 `ensure_paper_meta_card(spec, selected[0])` 盲取列表第一条，模型写 A、兜底改成 B，越兜越错；③成稿前没有一致性断言。现在的做法：动笔前按「素材最全 > 分数最高」锁定 `target_paper` 单列进 Prompt（含 title / venue_label / authors + 锁定铁律，`PAPER_FOCUS_RULES`）；成稿后用三条**确定性**证据判定「正文到底在讲谁」——正文配图文件名命中谁的 images（最硬，×3/张）、方法代号（DeLang-SR / MUTE，来自标题 / **GitHub 仓库名** / 图注 / 摘要，按信源加权）命中谁、信息卡标题最像谁；判定结果与信息卡不符时按**正文主体**重新绑定三行（`bind_paper_meta`，逐字取 `paper_meta_values`），并写一条 `元信息一致性` 告警；作者取不到时**删行而不是编人名**；绑定后仍不一致 → `PipelineError` 熔断不出稿（宁可停更）。补图补表同样按目标论文取素材，杜绝「正文 A、图表 B」。顺带修掉两类元数据污染：OpenAlex 的 `arXiv (Cornell University)` 不再原样上卡（统一写「arXiv 预印本」，且预印本标题一律不带 venue 前缀），数据库 venue 的卷期/DOI 尾巴（`Pattern Recognition, 177 (2026) 113339. doi:…`）清洗为 `Pattern Recognition（PR）`；本地 PDF 的 `author` 元数据只存通讯作者时，回退首页作者行并用 Crossref 名单补全。**存量稿件体检**：`python -m scripts.audit_paper_meta`（只报告）/ `--fix`（按正文主体重绑三行、原稿备份到 `out/_meta_backup/`、rev+1 并标记待重推），2026-11-15 全量跑出 35 期论文稿中 6 期错位（全部集中在 11-14 三候选批次），已全部修复，复跑为 0。
+- **实验表格数据对齐契约（2026-11-15 表格错位事故修复）**：事故原型是《ICME 2024 | 恶劣天气人群计数》一期——TABLE II 被拆成 13 列（跨列分组表头各占一列）、Fig.3 柱状图的纵轴刻度（35/30/25…）与图例整段混进表体，成稿表格彻底错位。`pdf_tables()` 重构为**表注辖域中心制 + 双通道候选 + 审计择优**：①辖域取词**绝不裁字**（居中表注的窄块当 clip 会把 "Metric" 裁成 "etric"，改为全页词按几何过滤、向两侧展宽 12pt）；②**词坐标重建**（主通道）——数字词锚定数据列（种子取自满行数据行，图表散点数字链式合并免疫）、每行按列框回格、跨列分组表头（`DH-SHT PartA / MAE RMSE`）折叠成 `DH-SHT PartA MAE` 单行、图表残渣按「行签名」（满格 + 数值格数）整段截断、折行方法名并回下一数据行、表注续行（全大写无数字短块）并入表注区；③**双通道候选**（find_tables lines/text + 词坐标重建）去重后按网格质量分（表头完整度 + 满格率 + 列形态一致性，宽表/表注入头/超长表头重罚）择优，词坐标重建同分优先；④**数字回源校验**——入选表的每个数字 token 必须能在表注辖域原始词序列里逐字找回，找不回即整表判废（宁缺毋假）。Prompt 侧同步固化**行列对齐铁律**（表格逐格照抄素材、禁止移动/交换/重排单元格、只许整列裁剪）与**人机协作润色纪律**（只改指定位置 / 人工意图至上 / 表格数据零失真，`EDIT_COLLAB_RULES`）。实测：该 PDF 五张表（I–V）全部 100% 行列对齐、零残渣泄漏（`tests/test_table_alignment.py`，含真实 PDF 集成测试与合成 PDF 单测）。
 - **筛选**：核心词（low-level vision / super-resolution…）3 分、任务词（去雾/去噪/压缩…）2 分、外围词 1 分；会议等级（CVPR/ICCV/ECCV/NeurIPS/TPAMI…）与时效指数衰减加权；相似标题去重 + 同方向最多 2 条的多样性约束。阈值在 `topics.yaml → academic.filter`。
 - **配图**：熵视示意图 / arXiv HTML 按 caption 关键词（architect/overview/pipeline…）挑架构图 / PyMuPDF 渲染 PDF 首页，三级兜底。
 - **版式**：导语 → 论文信息卡（meta_card）→ 01 问题 → 02 方法拆解（架构图 + 模块讲解）→ 03 实验（表格）→ 04 代价与边界 → 05 顺带值得一看。
@@ -287,7 +289,9 @@ challenge report：赛题定义、数据规格、评测协议、完整榜单、�
 | GET | `/api/stats` | 素材池、成稿、token 用量 |
 | POST | `/api/run/{module}` | 触发出稿（后台任务），body 可传 `publish`、`top_n` |
 | GET | `/api/jobs/{id}` | 任务进度 |
-| GET | `/api/issues` · `/api/issues/{id}` | 成稿列表 / 详情 |
+| GET | `/api/issues` | 历史出稿列表：`page/page_size` 分页 + `query` 模糊检索（标题/摘要/正文/论文原名/板块中文名，不区分大小写），返回 `{items,total,page,page_size,pages}`；`limit` 兼容旧调用 |
+| GET | `/api/issues/all` | 一次性取全部存档（导出/备份用） |
+| GET | `/api/issues/{id}` | 详情 |
 | GET | `/api/issues/{id}/edit` | 编辑器初始化：Markdown 原文 + 版本信息 |
 | POST | `/api/issues/{id}/render` | Markdown → 微信排版 HTML（只排版不落库） |
 | POST | `/api/issues/{id}/content` | **保存润色稿**：服务端重排入库/落盘/重生成预览，rev 自增 |
@@ -297,9 +301,18 @@ challenge report：赛题定义、数据规格、评测协议、完整榜单、�
 | GET | `/api/prompts/{module}` | 查看完整 Prompt |
 | GET | `/api/sources` · `/api/orphans` | 数据源清单 / 未消耗素材 |
 
-## 7.5 人工润色编辑器（Markdown ⇄ 富文本双向同步）
+## 7.5 历史出稿（分页 + 模糊检索）
 
-「最近出稿」每期新增 **编辑润色** 入口，打开双栏面板：
+原「最近出稿」已升级为**历史出稿**：解除 `LIMIT 20` 截断，全量存档按时间倒序翻页查看。
+
+- **分页**：每页 10 / 20 / 50 条可切换，页码窗口（首尾 + 当前 ±2 + 省略号）、上一页/下一页、页码跳转、总条数统计；页码越界自动收敛到最后一页；
+- **模糊检索**：顶部搜索栏实时过滤（280ms 防抖），范围覆盖公众号标题、摘要、正文 Markdown、条目原始列表（含论文原名 / 来源 / 会场）、期号与板块中文名（搜「学术论文」即命中全部 paper 模块稿）；不区分大小写；命中词高亮 `<mark>`，标题不含检索词时展示**正文命中片段**；搜索自动重置到第 1 页；
+- **操作按钮与配色不变**：预览 / 编辑润色 / 复制 MD / 推草稿 / 删除五键语义配色原样保留；推送契约不变（润色最新版 + 「文字原创」+「每日推送」）；
+- 离线体检：`python -m scripts.verify_archive_panel`（临时实例灌 27 期合成稿，浏览器走完「翻页 → 切每页条数 → 板块检索 → 正文检索 → 空态 → 清空恢复」七步）。
+
+## 7.6 人工润色编辑器（Markdown ⇄ 富文本双向同步）
+
+「历史出稿」每期保留 **编辑润色** 入口，打开双栏面板：
 
 - **左栏 Markdown 源码**：结构微调、链接修正、语法级编辑；改动 120ms 内实时渲染到右栏；
 - **右栏富文本**：按公众号排版观感呈现（小节蓝条 / 蓝底表头 / 图注），可直接改字、删句、调顺序，改动 220ms 内反解回左栏 Markdown；
@@ -308,6 +321,8 @@ challenge report：赛题定义、数据规格、评测协议、完整榜单、�
 - **推送契约**：`push_issue` 现读库里的 HTML，因此推送内容**永远是最后一次保存的润色版**；已推过的稿子再润色会置为 `edited`（已润色·待重推），提示后台那份已过期；
 - **发布属性铁律不变**：原创声明 `文字原创`、合集 `每日推送`，推送前断言、推完补勾（见 `app/publish/attrs.py`）；
 - **图表红线**：表格 / 配图 / 图注在两栏转换中按结构保留（`tests/test_md_edit.py` 有逐格断言），不会因同步被误删；
+- **数据对齐契约（保存侧闸门）**：`app/edit.py::assert_tables_stable` 在入库前强制两道校验——①行列等宽（某行格数 ≠ 表头列数 = 有未转义的「|」混进单元格，当场拒绝并指出行号）；②渲染往返不变量（md → spec → `spec_to_markdown` → spec 的表格逐字一致）。错位的表进不了库；`changed_scope(old, new)` 输出块级/表格级 diff 报告，把人机协作「只改指定位置」纪律变成可校验的审计；
+- **存量错表修复**：早期解析器留下的错位表可用 `python -m scripts.fix_table_issue --issue <issue_id> --pdf <原PDF> --match <表注关键字> [--drop Year]` 按原表重建——脚本自动定位稿内空洞率最高的错表，替换前做三道断言（新表逐格 = PDF 裁列后原表、行序一致、清除的数值必须全部是 PDF 里不存在的图表残渣），正文零改动（`changed_scope` 只许表格块变化），落库走 `save_edit`（rev 自增），原稿备份在 `out/_table_backup/`；
 - 离线体检：`python -m scripts.verify_edit_panel`（临时实例 + Edge 真浏览器走完「载入 → 左改右现 → 右改左现 → 保存 → 落库」全程，需要 `pip install playwright`）。
 
 ## 8. 测试
@@ -316,7 +331,7 @@ challenge report：赛题定义、数据规格、评测协议、完整榜单、�
 python -m unittest discover -s tests -v
 ```
 
-覆盖（508 例）：lowlevelcv 解析器（用真实页面夹具）、评分与筛选、JSON 修复、Spec 校验、微信渲染（内联样式/转义/内联语法）、Markdown 导出、图片格式归一、四个赛事源的解析与蜜罐识别、报名状态判定与练习赛门槛、赛事/业界封面选图、标题自审、观点内化、发布属性断言、业界「事件级查重 / 同批合并 / 主题纯粹性清洗 / 数字核对」（`tests/test_industry_focus.py`）、指定论文检索的「标题匹配 / 多源合并 / JATS 表格 / 图注区域渲染 / 单元格校验 / Sci-Hub 合规默认」（`tests/test_paper_search.py`）、人工润色链路的「Markdown 反解 / 图表保全 / 落库版本 / 推送取最新版与发布属性」（`tests/test_md_edit.py`）、以及赛事时效闸门的「老日期解析 / 过期一票否决 / 历史年份 / 超窗 / 无时效证据 / 官方页二次判定 / 候选全过期不出稿」（`tests/test_contest_recency.py`）。
+覆盖（542 例）：lowlevelcv 解析器（用真实页面夹具）、评分与筛选、JSON 修复、Spec 校验、微信渲染（内联样式/转义/内联语法）、Markdown 导出、图片格式归一、四个赛事源的解析与蜜罐识别、报名状态判定与练习赛门槛、赛事/业界封面选图、标题自审、观点内化、发布属性断言、业界「事件级查重 / 同批合并 / 主题纯粹性清洗 / 数字核对」（`tests/test_industry_focus.py`）、指定论文检索的「标题匹配 / 多源合并 / JATS 表格 / 图注区域渲染 / 单元格校验 / Sci-Hub 合规默认」（`tests/test_paper_search.py`）、人工润色链路的「Markdown 反解 / 图表保全 / 落库版本 / 推送取最新版与发布属性」（`tests/test_md_edit.py`）、赛事时效闸门的「老日期解析 / 过期一票否决 / 历史年份 / 超窗 / 无时效证据 / 官方页二次判定 / 候选全过期不出稿」（`tests/test_contest_recency.py`）、论文元信息绑定的「代号抽取 / 正文主体判定 / 错位重绑 / 编造标题兜底 / 作者缺失删行 / Prompt 权威块 / 预印本 venue 归一 / **事故全链路回放**」（`tests/test_paper_grounding.py`）、以及**实验表格数据对齐契约**的「词坐标重建 / 残渣截断 / 引用合并 / 数字回源 / 真实五表全对齐 / 编辑行列等宽守卫 / 最小改动审计」（`tests/test_table_alignment.py`）。
 
 ## 9. 部署建议
 
@@ -335,6 +350,7 @@ python -m unittest discover -s tests -v
 - 草稿箱接口要求认证订阅号/服务号；未认证账号请用预览页的「复制 Markdown」或「复制富文本」手动粘贴。
 - 赛事源的时效性天然衰减快：雷达条目里 `signup=closed` 的直接丢，但「报名已结束」常常只写在详情页正文里，所以精读前必须逐条抓官方页核验（`fetch_contest_detail`），这一步单条约 3–8 秒；候选全部截止时会退化成复盘稿，而非硬凑一场。
 - 时效闸门的边界（2026-11-11 定稿）：①**没有任何日期、只靠接口在办标记**放行的条目（DataCastle / Codabench 列表接口）判据最弱，会在日志里标 `verified=false`，真正的把关发生在 `fetch_contest_detail` 二次判定——官方页被反爬或超时时，这一条按源标记放行，宁可漏杀也不误杀正常场次；②阈值可调：`competitions.filter.upcoming_days`（推荐窗口 120 天）/ `stale_days`（无未来日期时的时间证据陈旧度 120 天）/ `history_days`（历史老赛事 730 天），收紧 `history_days` 即可把「去年场次」也挡在外面；③闸门只认「日期证据」，不认赛事名气与奖金——高奖金的历史赛事照样否决，这是刻意为之。验证脚本 `scripts/verify_contest_recency.py`（`--offline` 只跑 2019 FlyAI 回归用例）。
+- 元信息绑定的边界（2026-11-15）：判据靠「代号 / 配图 / 标题相似度」这些可验证证据，不做语义理解——正文若通篇只写中文方法名、既没引用该论文配图、代号也没在标题/仓库名/摘要里出现，会判成「无法判定」，此时回退到信息卡自述或候选第一名（并留下 `元信息一致性` 告警）。真出现「正文讲 A、信息卡写 B」且两边都无证据时，系统只能按候选第一名绑——这类稿子请结合告警人工复核。
 - FlyAI 主站上瑞数（验证码 + 动态 JS），无头浏览器同样被拦，只走静态镜像；镜像更新有延迟，新赛事可能晚几天出现。
 - Codabench 对无 `User-Agent` 的直连返回蜜罐页（《1984》随机段落、状态码 200），必须靠 `looks_like_honeypot` 识别后转无头渲染，否则会把小说段落当赛题喂给模型。
 - 封面图（`app/render/cover_select.py`）只从「本条素材自己的页面」取图，三模块策略不同：论文走 arXiv HTML → PDF 抠图（teaser/架构/对比图）→ 列表页缩略图；业界走仓库 README（raw 被掐时自动换 gcore.jsdelivr 镜像）→ 项目官网 og:image；赛事只认官方视觉 / 数据集样例 / baseline 框架图，**分数不到阈值就退品牌底图，绝不硬凑**。所有候选过体检（尺寸 / 比例 / 空白图 / badge 头像），logo 走 contain 版式不裁切。**封面只出本期主角素材**（一期选 4 条时，绝不借第 3 条的配图当封面——文章写 A、封面是 B 是硬伤）；主角没有合格图就退品牌底图。阈值与画布尺寸在 `topics.yaml` 的 `cover:` 段可调。

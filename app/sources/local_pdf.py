@@ -108,12 +108,19 @@ def _looks_like_title(line: str) -> bool:
 
 
 def _parse_authors(metadata: dict, page_lines: list[str], title: str) -> list[str]:
+    """作者名单：先信 PDF 元数据，元数据不全（≤1 人）再回退首页作者行。
+
+    Elsevier / MDPI 的 PDF 元数据里 author 常只存通讯作者一人，直接照抄会让
+    信息卡写成「由 Boyang Yao 等研究人员共同完成」——四个人只署名一个，
+    读者一查原文就觉得不专业。这里把「元数据不足 2 人」视为不完整，继续往下找。
+    """
     raw = _clean_line(metadata.get("author") or "")
+    from_meta: list[str] = []
     if raw:
-        names = [n.strip() for n in re.split(r"[;,]", raw) if n.strip()]
-        names = [n for n in names if _NAME_RE.match(n)]
-        if names:
-            return names[:12]
+        from_meta = [n.strip() for n in re.split(r"[;,]", raw) if n.strip()]
+        from_meta = [n for n in from_meta if _NAME_RE.match(n)][:12]
+        if len(from_meta) >= 2:
+            return from_meta
     for line in page_lines:
         low = line.lower()
         if title and _clean_line(title).lower() in low:
@@ -134,7 +141,7 @@ def _parse_authors(metadata: dict, page_lines: list[str], title: str) -> list[st
                 names.append(part)
         if len(names) >= 2:
             return names[:12]
-    return []
+    return from_meta      # 首页也没解析出完整名单：退回元数据那 1 个人，不编
 
 
 def _parse_keywords(text: str) -> list[str]:
@@ -262,6 +269,9 @@ def merge_online(item: Item, hit) -> Item:
     item.venue = item.venue or rec.venue or rec.publisher
     item.year = item.year or rec.year
     if not item.authors:
+        item.authors = rec.authors
+    elif len(item.authors) <= 1 and len(rec.authors or []) > len(item.authors):
+        # 本地只解析出一位（元数据缺 author 字段）：Crossref 的作者名单更全，用它补
         item.authors = rec.authors
     if not item.summary:
         item.summary = rec.abstract

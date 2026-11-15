@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -49,8 +50,10 @@ _RESULT_WORDS = ("qualitative", "comparison", "compared", "visual result", "resu
 _MAX_FIGURE_PAGES = 20
 # 数字单元格：允许 0.9374 / 94.68% / -12.3 / 352 / 1e-4
 _NUM_CELL_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:e-?\d+)?%?$", re.I)
-# 文本单元格：方法名/指标名，短且无控制字符
-_TEXT_CELL_RE = re.compile(r"^[A-Za-z][A-Za-z\d .+\-/()×x%≤≥~]{0,32}$")
+# 数字词锚点：词坐标重建时认「这格是数值」（允许千分位逗号，比单元格更宽松）
+_NUM_ANCHOR_RE = re.compile(r"^-?[\d,]+(?:\.\d+)?(?:e-?\d+)?%?$")
+# 文本单元格：方法名/指标名，短且无控制字符（方括号引用、逗号都是论文表格常态）
+_TEXT_CELL_RE = re.compile(r"^[A-Za-z\[][A-Za-z\d .+\-/()×x%≤≥~\[\],]{0,40}$")
 # 表注：IEEE 惯例是罗马数字（TABLE I / TABLE IV），其它刊物用阿拉伯数字
 _TABLE_CAPTION_RE = re.compile(r"^\s*table\s+(?:\d{1,2}|[IVX]{1,5})\b", re.I)
 # 表体下边界：同栏下一处表注/图注或章节标题、参考文献标题
@@ -477,31 +480,71 @@ def _table_captions(page) -> list[tuple]:
 
 
 def _table_band(page, caption: tuple):
-    """表注下方同栏的表体纵向范围：到同栏下一处表注/图注/章节标题为止。"""
+    """表注下方同栏的表体纵向范围：到同栏下一处表注/图注/章节标题为止。
+
+    表注常被 PDF 拆成多块（"TABLE III" 一块、续行 "ABLATION STUDY OF …"
+    另一块）：紧邻的、全大写、不含数值的短块并入表注区，否则续行会被
+    词坐标重建吸进表头，表头就带上 "STAGES." 这类碎屑。
+    """
     x0, x1, y1 = caption[0], caption[2], caption[3]
+    blocks = [b for b in page.get_text("blocks") if len(b) >= 7 and b[6] == 0]
+    top = y1
+    changed = True
+    while changed:
+        changed = False
+        for b in blocks:
+            bx0, by0, bx1, by1 = b[0], b[1], b[2], b[3]
+            if by0 <= top + 1 or by0 - top > 9:
+                continue  # 必须紧贴当前表注区下缘
+            if min(bx1, x1) <= max(bx0, x0):
+                continue  # 必须同栏
+            text = re.sub(r"\s+", " ", str(b[4] or "")).strip()
+            letters = [ch for ch in text if ch.isalpha()]
+            if not letters or len(text) > 120:
+                continue
+            if sum(1 for ch in letters if ch.isupper()) / len(letters) < 0.7:
+                continue  # 表头行是大小写混排的，只有表注续行才是整句全大写
+            if _NUM_ANCHOR_RE.match(text) or re.search(
+                    r"\d+\.\d+", text):
+                continue  # 含数值的是表体不是表注
+            top = by1
+            changed = True
     stop = float(page.rect.y1)
-    for block in page.get_text("blocks"):
+    for block in blocks:
         if len(block) < 7 or block[6] != 0:
             continue
         bx0, by0, bx1 = block[0], block[1], block[2]
-        if by0 <= y1 + 2 or min(bx1, x1) <= max(bx0, x0):
+        if by0 <= top + 2 or min(bx1, x1) <= max(bx0, x0):
             continue
         if _TABLE_STOP_RE.match(re.sub(r"\s+", " ", str(block[4] or "")).strip()):
             stop = min(stop, by0)
-    if stop - y1 < 24:
+    if stop - top < 24:
         return None
-    return (x0 - 4.0, y1 + 1.0, x1 + 4.0, stop - 1.0)
+    return (x0 - 4.0, top + 1.0, x1 + 4.0, stop - 1.0)
 
 
-def _grid_from_words(page, clip) -> list[list[str]]:
-    """无框线表（IEEE 常见：表体只剩填充矩形）按词坐标重建行列。
+def _band_words(page, band, pad: float = 12.0) -> list[tuple]:
+    """表注辖域内的完整词（绝不裁字）：x 与展宽后的辖域重叠过半、y 落在辖域内。
 
-    find_tables 的 lines/text 两个策略对这类版式都返回零表，但单元格文字
-    仍在文本层：按 y 中心聚成行、按 x 中心聚成列即可还原，列内按 x 排序拼字。
+    居中表注的文本块比表体窄，直接拿它当 clip 会把表体左缘的 "Metric" 裁成
+    "etric"、"MAE" 裁成 "AE"——数据从这里开始错位。所以先取全页词，
+    再按几何过滤；向两侧展宽 pad 兼顾表体略宽于表注的版式。
     """
-    words = [w for w in page.get_text("words", clip=clip, sort=True)
-             if str(w[4] or "").strip()]
-    if len(words) < 6:
+    x0, y0, x1, y1 = band
+    out = []
+    for w in page.get_text("words", sort=True):
+        if (w[1] + w[3]) / 2.0 <= y0 or w[1] > y1 + 1.0:
+            continue  # 词心在辖域上缘之上 = 表注末行（bbox 下缘常与上缘齐平）
+        overlap = min(w[2], x1 + pad) - max(w[0], x0 - pad)
+        if overlap >= 0.5 * max(1.0, w[2] - w[0]):
+            out.append(w)
+    return out
+
+
+def _words_rows(words: list[tuple]) -> list[list[tuple]]:
+    """词按 y 中心聚成行，行内按 x 排序（词 = (x0, y0, x1, y1, text, …)）。"""
+    words = [w for w in words if str(w[4] or "").strip()]
+    if len(words) < 4:
         return []
     heights = sorted(max(1.0, w[3] - w[1]) for w in words)
     row_tol = max(2.0, heights[len(heights) // 2] * 0.55)
@@ -514,35 +557,245 @@ def _grid_from_words(page, clip) -> list[list[str]]:
                 rows[-1].append(w)
                 continue
         rows.append([w])
-    widths = sorted(max(0.5, (w[2] - w[0]) / max(1, len(str(w[4])))) for w in words)
-    col_tol = max(3.0, widths[len(widths) // 2] * 2.2)
-    centers: list[float] = []
-    for cx in sorted((w[0] + w[2]) / 2.0 for w in words):
-        if centers and cx - centers[-1] <= col_tol:
-            centers[-1] = (centers[-1] + cx) / 2.0
-        else:
-            centers.append(cx)
-    if len(centers) < 2 or len(rows) < 2:
+    for r in rows:
+        r.sort(key=lambda w: w[0])
+    return rows
+
+
+def _numeric_words(row: list[tuple]) -> list[tuple]:
+    """一行里的数值词（尾随逗号的枚举 token 如 "1," 不算数值）。"""
+    return [w for w in row if _NUM_ANCHOR_RE.match(str(w[4]).rstrip(","))]
+
+
+def _data_frames(rows: list[list[tuple]]) -> list[tuple[float, float]]:
+    """由「满行数据行」的数值词做种子聚出数据列，返回每列 (x0, x1) 区间。
+
+    种子只取数值格最多的行（真数据行的数值列彼此对齐，列间距远大于列内抖动），
+    其余数值词就近归入种子列——图表轴刻度以同 x 纵向堆叠、散点横跨全栏，
+    链式聚类会被它们桥接成一整条，种子法天然免疫；单字符枚举 token（表头
+    "Stage 1, 2" 里的 1/2/3）不当种子。成员数不足峰值 60% 的列丢弃。
+    """
+    counts = [len(_numeric_words(r)) for r in rows]
+    peak = max(counts, default=0)
+    if peak < 2:
         return []
-    grid = []
+    seed_rows = [r for r, n in zip(rows, counts) if n >= max(2, int(0.8 * peak))][:6]
+    strong = [w for r in seed_rows for w in _numeric_words(r) if len(str(w[4]).rstrip(",")) >= 2]
+    seed_words = strong or [w for r in seed_rows for w in _numeric_words(r)]
+    if not seed_words:
+        return []
+    seeds = sorted((w[0] + w[2]) / 2.0 for w in seed_words)
+    # 种子按列聚拢（同列种子中心几乎重合）
+    widths = sorted(w[2] - w[0] for w in seed_words)
+    tol = max(6.0, 0.5 * widths[len(widths) // 2])
+    cols: list[list[float]] = [[seeds[0]]]
+    for c in seeds[1:]:
+        if c - cols[-1][-1] <= tol:
+            cols[-1].append(c)
+        else:
+            cols.append([c])
+    centers = [sum(g) / len(g) for g in cols]
+    gaps = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
+    assign_tol = max(8.0, 0.35 * gaps[len(gaps) // 2]) if gaps else 8.0
+    members: list[list] = [[] for _ in centers]
     for row in rows:
-        cells: list[list[tuple]] = [[] for _ in centers]
-        for w in row:
+        for w in _numeric_words(row):
             cx = (w[0] + w[2]) / 2.0
-            j = min(range(len(centers)), key=lambda k: abs(centers[k] - cx))
-            cells[j].append(w)
-        grid.append([" ".join(str(w[4]) for w in sorted(c, key=lambda w: w[0]))
-                     for c in cells])
-    return [[re.sub(r"\s+", " ", c).strip() for c in row] for row in grid]
+            k = min(range(len(centers)), key=lambda i: abs(centers[i] - cx))
+            if abs(centers[k] - cx) <= assign_tol:
+                members[k].append(w)
+    frames = []
+    for mem in members:
+        if mem:
+            frames.append([min(w[0] for w in mem), max(w[2] for w in mem), len(mem)])
+    peak_m = max((f[2] for f in frames), default=0)
+    return [(f[0], f[1]) for f in frames if f[2] >= max(2, 0.6 * peak_m)]
 
 
-def _table_dict(grid: list[list[str]], caption: str) -> dict | None:
-    """过完整性校验后转成 {caption, header, rows}；不达标返回 None。"""
+def _assign_col(w, frames) -> int:
+    """词 → 列号；-1 = 首列左侧的标签列（方法名/Dataset 等）。"""
+    cx = (w[0] + w[2]) / 2.0
+    widths = sorted(f[1] - f[0] for f in frames)
+    bias = max(8.0, 0.25 * widths[len(widths) // 2])
+    if cx < frames[0][0] - bias:
+        return -1
+    return min(range(len(frames)),
+               key=lambda k: abs((frames[k][0] + frames[k][1]) / 2.0 - cx))
+
+
+def _phrase_row(row: list[tuple], frames) -> list[list]:
+    """表头行的词 → 短语 [text, x0, x1, cols]；cols ≥ 2 即跨列分组表头。
+
+    相邻词间距小于列距阈值时拼成短语（"DH-SHT" + "PartA" → "DH-SHT PartA"），
+    被拆开的同列短语再回拼（"Stage 1," + "2" → "Stage 1, 2"）。
+    """
+    gap_tol = 3.0
+    if len(frames) >= 2:
+        gaps = sorted(frames[i + 1][0] - frames[i][1] for i in range(len(frames) - 1))
+        gap_tol = max(3.0, 0.35 * gaps[len(gaps) // 2])
+    phrases: list[list] = []
+    for w in row:
+        if phrases and w[0] - phrases[-1][2] <= gap_tol:
+            phrases[-1][0] += " " + str(w[4])
+            phrases[-1][2] = w[2]
+        else:
+            phrases.append([str(w[4]), w[0], w[2]])
+    out = []
+    for text, x0, x1 in phrases:
+        cols = [j for j, (f0, f1) in enumerate(frames)
+                if min(x1, f1) - max(x0, f0) >= 0.3 * max(1.0, x1 - x0)]
+        if not cols:
+            cols = [_assign_col((x0, 0.0, x1, 0.0, text), frames)]
+        out.append([text, x0, x1, cols])
+    merged = [out[0]]
+    for p in out[1:]:
+        if p[3] == merged[-1][3] and p[3][0] >= 0:
+            merged[-1][0] += " " + p[0]
+            merged[-1][2] = p[2]
+        else:
+            merged.append(p)
+    return merged
+
+
+def _cell_numeric(cell: list[str]) -> bool:
+    text = " ".join(str(x) for x in cell).strip().strip(".,;")
+    return bool(text) and bool(_NUM_CELL_RE.match(text))
+
+
+def _band_grid(page, band) -> list[list[str]] | None:
+    """表注辖域内的词坐标重建——数据对齐契约的主通道。
+
+    数字词锚定数据列 → 每行按列框回格 → 多行分组表头折叠成单行 →
+    按「行签名」截掉图表残渣（轴刻度/图例）。返回 [header, *rows] 网格，
+    表头、方法名、数值 100% 对应；对齐不了的稀疏行一律丢弃，宁缺毋假。
+    """
+    rows = _words_rows(_band_words(page, band))
+    if len(rows) < 2:
+        return None
+    rough = [row for row in rows if len(_numeric_words(row)) >= 2]
+    if len(rough) < 2:
+        return None
+    frames = _data_frames(rough)
+    if len(frames) < 2:
+        return None
+
+    def _place(rs, frs):
+        out = []
+        for row in rs:
+            cells: list[list[str]] = [[] for _ in frs]
+            label: list[str] = []
+            for w in row:
+                j = _assign_col(w, frs)
+                (label if j < 0 else cells[j]).append(str(w[4]))
+            out.append((label, cells))
+        return out
+
+    # 行分类：数值格 ≥ 2 且数值占比 ≥ 0.5 的才是数据行（表头/图例行都是文本格）
+    def _is_data(cells) -> bool:
+        filled = [c for c in cells if c]
+        nums = sum(1 for c in filled if _cell_numeric(c))
+        return len(filled) >= 2 and nums >= 2 and nums * 2 >= len(filled)
+
+    placed = _place(rows, frames)
+    # 两遍帧计算：首遍帧可能被表头枚举 token / 图表数字污染，用干净数据行重算
+    data_rows = [row for row, (_l, c) in zip(rows, placed) if _is_data(c)]
+    if len(data_rows) >= 2:
+        refined = _data_frames(data_rows)
+        if len(refined) >= 2:
+            frames = refined
+            placed = _place(rows, frames)
+
+    first = next((i for i, (_l, c) in enumerate(placed) if _is_data(c)), -1)
+    if first < 0:
+        return None
+    width = len(frames) + 1
+    # 表头：数据行之前最多 3 行；整句大写的表注续行（>80 字符）不是表头，跳过；
+    # 跨列分组短语下放给被覆盖的每一列后折叠成单行
+    covers: list[list[str]] = [[] for _ in range(width)]
+    for row in rows[max(0, first - 3):first]:
+        if len(" ".join(str(w[4]) for w in row)) > 80:
+            continue
+        for text, _x0, _x1, cols in _phrase_row(row, frames):
+            for j in cols:
+                covers[j + 1].append(text)
+    header = []
+    for parts in covers:
+        dedup: list[str] = []
+        for p in parts:
+            if not dedup or dedup[-1] != p:
+                dedup.append(p)
+        header.append(" ".join(dedup).strip())
+
+    def _full_row(cells) -> bool:
+        filled = sum(1 for c in cells if c)
+        nums = sum(1 for c in cells if _cell_numeric(c))
+        return nums >= 2 and filled >= math.ceil(0.7 * width)
+
+    last = max((i for i in range(first, len(rows)) if _full_row(placed[i][1])),
+               default=-1)
+    if last < first:
+        return None
+    grid = [header]
+    pending: list[str] = []
+
+    def _clean_label(words: list[str]) -> str:
+        # 辖域展宽吸进来的孤立脚标（单个字母）不许混进方法名
+        while len(words) > 1 and len(words[0].strip()) == 1 and words[0].isalpha():
+            words = words[1:]
+        return " ".join(words).strip()
+
+    for i in range(first, last + 1):
+        label, cells = placed[i]
+        if _full_row(cells):
+            grid.append([_clean_label(pending + label)]
+                        + [" ".join(c).strip() for c in cells])
+            pending = []
+        elif not _numeric_words(rows[i]):
+            pending.extend(label)      # 折行的方法名：并给下一个数据行
+        # 行内含数字但不满格的行 = 图表残渣，丢弃（对齐不了的数据宁可不呈现）
+    return grid if len(grid) >= 2 else None
+
+
+def _trim_grid(grid: list[list[str]]) -> list[list[str]]:
+    """网格修缮：规整单元格、丢全空列、截掉图表残渣行。
+
+    图表轴刻度/图例被误收进表体时，表现为「数值格远少于峰值的稀疏行」；
+    最后一个数值格达半数峰值的行之后的一切整段截断，尾部孤立数字行继续截。
+    对齐不了的残行一律丢弃：对齐不了的数据宁可不给，也绝不许错位。
+    """
+    if not grid:
+        return []
+    grid = [[re.sub(r"\s+", " ", str(c or "")).strip() for c in row] for row in grid]
+    width = max(len(r) for r in grid)
+    grid = [r + [""] * (width - len(r)) for r in grid]
+    keep = [j for j in range(width) if any(r[j] for r in grid)]
+    if not keep:
+        return []
+    grid = [[r[j] for j in keep] for r in grid]
+    counts = [sum(1 for c in row[1:] if _cell_numeric([c])) for row in grid]
+    peak = max(counts, default=0)
+    last = -1
+    for i, n in enumerate(counts):
+        if n >= max(1, 0.5 * peak):
+            last = i
+    grid = grid[:last + 1]
+    while len(grid) > 1 and sum(1 for c in grid[-1] if c) <= 1:
+        grid.pop()
+    return grid
+
+
+def _table_dict(grid: list[list[str]], caption: str,
+                *, folded: bool = False) -> dict | None:
+    """过完整性校验后转成 {caption, header, rows}；不达标返回 None。
+
+    folded=True 表示网格已经过词坐标重建（表头是折叠后的单行），跳过再折叠。
+    """
+    grid = _trim_grid(grid)
     if not _plausible_grid(grid):
         return None
     width = max(len(r) for r in grid)
     grid = [r + [""] * (width - len(r)) for r in grid]
-    if _is_two_row_header(grid):
+    if not folded and _is_two_row_header(grid):
         header = [grid[0][j] if grid[0][j] == grid[1][j] or not grid[0][j]
                   else (f"{grid[1][j]}@{grid[0][j]}" if _NUM_CELL_RE.match(grid[0][j])
                         else f"{grid[1][j]}({grid[0][j]})")
@@ -551,8 +804,138 @@ def _table_dict(grid: list[list[str]], caption: str) -> dict | None:
     return {"caption": caption, "header": grid[0], "rows": grid[1:]}
 
 
+# ---------------------------------------------------------------- 候选审计与数字回源
+_TABLE_NUM_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _table_numbers(table: dict) -> list[str]:
+    """表里出现过的全部数字 token（去重保序）。"""
+    cells = list(table.get("header") or [])
+    for row in table.get("rows") or []:
+        cells.extend(row or [])
+    toks: list[str] = []
+    for cell in cells:
+        for tok in _TABLE_NUM_TOKEN_RE.findall(str(cell)):
+            tok = tok.strip(",").strip()
+            if tok and tok not in toks:
+                toks.append(tok)
+    return toks
+
+
+def _band_text(page, band) -> str:
+    """表注辖域内的原始词序列（空格连接），作数字回源校验的基准。"""
+    return " ".join(str(w[4]) for w in _band_words(page, band))
+
+
+def _unverified_numbers(table: dict, band_text: str) -> list[str]:
+    """数字回源校验：表里每个数字 token 必须能在辖域原始词序列中逐字找回。
+
+    返回找不回的 token 列表——非空即代表这张表存在「来历不明的数字」，
+    按数据对齐契约整张判废（宁缺毋假）。无空格拼接串作降级比对，
+    兼容小数点被 PDF 拆成独立文本块的版式。
+    """
+    toks = _table_numbers(table)
+    if not band_text:
+        return toks
+    words = set(re.findall(r"[^\s]+", band_text))
+    despaced = re.sub(r"\s+", "", band_text)
+    bad: list[str] = []
+    for tok in toks:
+        if tok in words or tok in despaced:
+            continue
+        if tok not in bad:
+            bad.append(tok)
+    return bad
+
+
+def _grid_score(header: list[str], rows: list[list[str]]) -> float:
+    """网格质量分：表头完整度 + 满格率 + 列形态一致性；宽表重罚防列爆。"""
+    width = max(1, len(header))
+    score = 30.0 * sum(1 for h in header if str(h).strip()) / width
+    if rows:
+        filled = sum(sum(1 for c in r if str(c).strip()) for r in rows)
+        score += 40.0 * filled / (width * len(rows))
+    consistent = 0
+    for j in range(width):
+        vals = [str(r[j]).strip() for r in rows if j < len(r) and str(r[j]).strip()]
+        if not vals:
+            continue
+        nums = sum(1 for v in vals if _NUM_CELL_RE.match(v.strip().strip(".,;")))
+        ratio = nums / len(vals)
+        if ratio >= 0.75 or ratio <= 0.25:
+            consistent += 1
+    score += 20.0 * consistent / width
+    if width > 9:
+        score -= (width - 9) * 6.0
+    if any(re.search(r"\btable\b", str(h), re.I) for h in header):
+        score -= 40.0  # 表注文字被吸进表头 = 解析已失真
+    score -= 15.0 * sum(1 for h in header if len(str(h).strip()) > 28)
+    score -= 15.0 * sum(1 for r in rows for c in r if len(str(c).strip()) > 40)
+    return score
+
+
+def _best_table(page, band, caption: str) -> dict | None:
+    """同一表注辖域内的多通道候选择优：find_tables 两策略 + 词坐标重建。
+
+    全部候选先去重，再按网格质量分排序；逐个做数字回源校验，第一个
+    「零来历不明数字」的候选入选；全部有缺失时退而取缺失率 ≤ 2% 的最高分者，
+    否则放弃（宁缺毋假）。
+    """
+    band_text = _band_text(page, band)
+    candidates: list[dict] = []
+    for strategy in ("lines", "text"):
+        for tab in _find_tables(page, strategy):
+            b = tuple(tab.bbox)
+            if not (min(b[2], band[2]) > max(b[0], band[0])
+                    and min(b[3], band[3]) > max(b[1], band[1])):
+                continue  # 表体不在该表注辖域内，不属于这张表
+            d = _table_dict(_table_grid(page, tab), caption)
+            if d:
+                candidates.append(d)
+    rebuilt = _band_grid(page, band)
+    if rebuilt:
+        d = _table_dict(rebuilt, caption, folded=True)
+        if d:
+            candidates.append(d)
+    uniq: dict[tuple, list] = {}
+    for d in candidates:
+        key = (tuple(d["header"]), tuple(tuple(r) for r in d["rows"]))
+        if key not in uniq:
+            uniq[key] = [d, 0.0]
+    # 词坐标重建是数据对齐契约的主通道（几何对齐 + 数字回源双校验）：
+    # 与 find_tables 候选分差 ≤ 15 时一律优先——find_tables 的 text 策略
+    # 常把相邻窄列并成一列（如 Methods/Year），满格率并不吃亏但表头已失真
+    rebuilt_key = None
+    if rebuilt:
+        rebuilt_key = (tuple(rebuilt[0]), tuple(tuple(r) for r in rebuilt[1:]))
+    for pair in uniq.values():
+        key = (tuple(pair[0]["header"]), tuple(tuple(r) for r in pair[0]["rows"]))
+        if rebuilt_key and key == rebuilt_key:
+            pair[1] = 15.0
+    ranked = sorted(uniq.values(),
+                    key=lambda p: _grid_score(p[0]["header"], p[0]["rows"]) + p[1],
+                    reverse=True)
+    fallback = None
+    for pair in ranked:
+        d = pair[0]
+        bad = _unverified_numbers(d, band_text)
+        if not bad:
+            return d
+        total = max(1, len(_table_numbers(d)))
+        if len(bad) / total <= 0.02 and fallback is None:
+            fallback = d
+    return fallback
+
+
 def pdf_tables(pdf_bytes: bytes, limit: int = 3) -> list[dict]:
-    """PDF 表格提取（find_tables + 词坐标重建）+ 严格校验，不达标整表丢弃。
+    """PDF 表格提取：表注辖域中心制 + 双通道候选 + 审计择优 + 数字回源校验。
+
+    数据对齐契约（铁律）：
+    1. 行列精准映射——词坐标重建以数字词锚定数据列、跨列分组表头折叠成单行，
+       表头/方法名（Baseline vs. SOTA vs. Ours）/数值 100% 对应；图表轴刻度
+       与图例按行签名整段截断，绝不混入表体。
+    2. 降级兜底校验——每张入选表的全部数字 token 必须能在该表辖域的原始
+       词序列里逐字找回，找不回即判废；多通道候选按网格质量分择优，宁缺毋假。
 
     只扫带表注的页：整本逐页跑两个策略在 19 页论文上要 80s+，而正文页永远
     不会有表；先看文本层有没有 "Table N." 再决定解析，耗时降到秒级。
@@ -564,39 +947,23 @@ def pdf_tables(pdf_bytes: bytes, limit: int = 3) -> list[dict]:
     except Exception:
         return []
     out: list[dict] = []
-    seen: set[tuple] = set()
+    seen: set[str] = set()
     try:
         for pno in range(len(doc)):
             page = doc.load_page(pno)
             captions = _table_captions(page)
             if not captions:
                 continue
-            boxes: list[tuple] = []
-            for strategy in ("lines", "text"):
-                for tab in _find_tables(page, strategy):
-                    key = (pno,) + tuple(int(v) for v in tab.bbox)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    table = _table_dict(_table_grid(page, tab),
-                                        _caption_for(captions, tab.bbox))
-                    if not table:
-                        continue
-                    out.append(table)
-                    boxes.append(tuple(tab.bbox))
-                    if len(out) >= limit:
-                        return out
-            # 表体是填充矩形/无框线时 find_tables 零命中，按表注下方的词坐标重建
             for cap in captions:
+                if cap[4] in seen:
+                    continue
                 band = _table_band(page, cap)
                 if not band:
                     continue
-                if any(min(b[2], band[2]) > max(b[0], band[0]) and
-                       min(b[3], band[3]) > max(b[1], band[1]) for b in boxes):
-                    continue
-                table = _table_dict(_grid_from_words(page, band), cap[4])
+                table = _best_table(page, band, cap[4])
                 if not table:
                     continue
+                seen.add(cap[4])
                 out.append(table)
                 if len(out) >= limit:
                     return out
@@ -1335,6 +1702,14 @@ async def enrich_target(client: HttpClient, item: Item, *, pdf_bytes: bytes = b"
     # 发表状态：Crossref/EuropePMC 的期刊字段就是权威结论，直接写进 publication，
     # 让标题走「venue 前缀」信誉规则（不再让 OpenReview 查证把期刊论文误判成预印本）
     if item.venue:
-        item.extra["publication"] = {"checked": True, "accepted": True,
-                                     "venue": item.venue, "source": "Crossref/EuropePMC"}
+        # arXiv / SSRN 这类托管方不是「正式收录」：若照抄 accepted=True，
+        # 标题就会顶着「arXiv (Cornell University) 2026 |」的假 venue 前缀发出，
+        # 既难看也违反「预印本不得挂 venue 标签」的信誉铁律
+        from ..spec_tools import is_preprint_venue
+
+        preprint = is_preprint_venue(item.venue)
+        item.extra["publication"] = {"checked": True, "accepted": not preprint,
+                                     "venue": item.venue,
+                                     "source": "Crossref/EuropePMC"
+                                     + ("（托管方为预印本服务器）" if preprint else "")}
     return summary

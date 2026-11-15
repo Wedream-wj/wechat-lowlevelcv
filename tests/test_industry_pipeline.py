@@ -37,7 +37,7 @@ class _FakeLLM:
         pass
 
     async def write(self, module, items, figures, date_str, on_progress=None,
-                    extra_instruction="", variant=None):
+                    extra_instruction="", variant=None, focus=None):
         _FakeLLM.seen.append([i.title for i in items])
         return mock_spec(module, items, figures)
 

@@ -17,6 +17,7 @@ from typing import Callable
 from . import db
 from .config import settings, topics
 from .filters import events as event_dedupe
+from .filters import grounding as paper_grounding
 from .filters import recency
 from .filters import scoring
 from .llm.client import LLMClient, LLMError
@@ -674,6 +675,17 @@ async def run_module(module: str, *, publish: bool | None = None,
         report("配图", 48, f"配图完成：{len(figures)} 张", True)
 
         llm = LLMClient()
+        # 论文稿的「唯一权威信源」必须在动笔前就钉死：一期素材里常有 3 篇候选，
+        # 不给目标论文，模型会正文写 A、信息卡填 B（2026-11-14 DeLang-SR 事故）。
+        # 选中规则：素材最全（有图有表）> 分数最高；只有一篇时就是它。
+        paper_focus = None
+        if module == "paper" and selected:
+            paper_focus = max(
+                selected,
+                key=lambda it: (len(it.images or []) + len(it.extra.get("tables") or []), it.score),
+            )
+            _log(f"本篇权威信源锁定：{paper_focus.title[:52]}"
+                 f"（{len(paper_focus.authors or [])} 位作者；其余候选只作对比背景）")
         try:
             report("成稿", 50, f"调用大模型成稿（{llm.mode}）…", True)
 
@@ -689,7 +701,8 @@ async def run_module(module: str, *, publish: bool | None = None,
                            f"模型写作中… 已输出约 {n} 字符")
 
             spec = await llm.write(module, selected, figures, date_str, on_progress=on_llm,
-                                   variant=variant if module == "contest" else None)
+                                   variant=variant if module == "contest" else None,
+                                   focus=paper_focus)
             # 表格里的数字必须能在素材里找到；素材里一个数字都没有时，出现表格更是编的。
             # 素材有数据却写成「无法量化」也要补写。
             if module == "paper" and llm.enabled:
@@ -710,6 +723,7 @@ async def run_module(module: str, *, publish: bool | None = None,
                             module, selected, figures, date_str,
                             on_progress=on_llm,
                             extra_instruction=quant_retry_instruction(bad_numbers, has_numbers),
+                            focus=paper_focus,
                         )
                         dropped = drop_unsupported_tables(spec, selected)
                         if dropped:
@@ -770,6 +784,7 @@ async def run_module(module: str, *, publish: bool | None = None,
                                 module, selected, figures, date_str,
                                 on_progress=on_llm,
                                 extra_instruction=SUMMARY_FOCUS_RETRY,
+                                focus=paper_focus,
                             )
                             if not prune_summary_offtopic(rewritten, selected):
                                 spec = rewritten
@@ -828,15 +843,42 @@ async def run_module(module: str, *, publish: bool | None = None,
         # 3) 图文混排：「核心创新与方法拆解」必须有架构图，「关键实验结果解读」必须有对比表，
         #    模型漏写时从素材里补（绝不凭空造图造表）。
         if module == "paper" and selected:
-            if ensure_paper_meta_card(spec, selected[0]):
+            # 元信息原子绑定：信息卡的「论文名称 / 期刊 / 作者」必须与**正文实际精读的那一篇**
+            # 是同一篇。判据不看模型自述，而是三条确定性证据——正文出现的配图来自谁、
+            # 方法代号（DeLang-SR / MUTE…）命中谁、信息卡标题最像谁。
+            target, pinfo = paper_grounding.resolve_meta_subject(spec, selected)
+            if pinfo.get("mismatch"):
+                msg = f"元信息错位已纠正：{pinfo['reason']}；按正文主体重新绑定为《{pinfo['target'][:44]}》"
+                errors.append({"source": "元信息一致性", "error": msg, "level": "warn"})
+                _log(msg)
+            if target is not None and target is not paper_focus:
+                _log(f"正文主体与动笔前锁定的信源不同：《{pinfo['target'][:44]}》")
+            if ensure_paper_meta_card(spec, target):
                 _log("论文信息卡已补全：论文名称 / 发表期刊/会议 / 作者团队三行置顶")
+            bound = paper_grounding.bind_paper_meta(spec, target)
+            if bound["fixed"]:
+                _log(f"信息卡三行已按目标论文逐字重绑（{bound['fixed']} 处）"
+                     + (f"，缺权威依据的行已删除：{'、'.join(bound['removed'])}"
+                        if bound["removed"] else ""))
             if scrub_paper_author_grammar(spec):
                 _log("作者表述已改写为「由 A、B 等人组成」（「来自 + 人名」是语法硬伤）")
+            problems = paper_grounding.assert_paper_meta(spec, target)
+            if problems:
+                raise PipelineError(
+                    "元信息一致性断言未通过，拒绝出稿（宁可停更也不发张冠李戴的稿子）："
+                    + "；".join(problems))
+            stray = paper_grounding.title_points_elsewhere(spec, selected, target)
+            if stray is not None:
+                msg = (f"标题方法代号指向另一篇候选《{stray.title[:40]}》，"
+                       f"与正文主体《{pinfo['target'][:40]}》不一致，请人工复核标题")
+                errors.append({"source": "元信息一致性", "error": msg, "level": "warn"})
+                _log(msg)
             if scrub_dangling_figures(spec, figures):
                 _log("已删除指向空素材的图块（避免渲染成 ![]() 空图）")
-            if ensure_paper_arch_figure(spec, selected[0], figures):
+            # 补图补表同样按**目标论文**取素材：正文写 A、图表却从 B 里补，是同一类错位
+            if ensure_paper_arch_figure(spec, target, figures):
                 _log("「核心创新与方法拆解」已补入模型架构图（原稿缺 figure 块）")
-            if ensure_paper_result_table(spec, selected[0]):
+            if ensure_paper_result_table(spec, target):
                 _log("「关键实验结果解读」已补入论文原表（原稿缺 table 块）")
             # 图表红线：补完之后仍然缺图又缺表，说明素材本身就没取到可解析内容——
             # 这种稿子发出去就是纯文字通稿，直接报因不出稿；

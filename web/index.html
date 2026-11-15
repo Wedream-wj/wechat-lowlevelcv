@@ -144,6 +144,36 @@
   .empty{padding:26px;text-align:center;color:#9AA0AE;font-size:12.5px;background:#fff;
     border:1px dashed #DDE1EA;border-radius:11px;}
 
+  /* ---------- 历史出稿：搜索栏 + 分页 ---------- */
+  .arch-tools{display:flex;gap:10px;align-items:center;margin:0 0 11px;flex-wrap:wrap;}
+  .arch-search{position:relative;flex:1;min-width:220px;display:flex;align-items:center;}
+  .arch-search svg{position:absolute;left:11px;width:14px;height:14px;fill:none;stroke:#9AA0AE;
+    stroke-width:1.8;stroke-linecap:round;pointer-events:none;}
+  .arch-search input{width:100%;padding:8px 12px 8px 32px;border:1px solid var(--line);
+    border-radius:9px;font-size:12.5px;background:#fff;color:var(--ink,#2B2E36);outline:none;
+    transition:border-color .2s,box-shadow .2s;}
+  .arch-search input::-webkit-search-cancel-button{cursor:pointer;}
+  .arch-search input:focus{border-color:#B9C4E8;box-shadow:0 0 0 3px rgba(65,88,208,.09);}
+  .arch-size{font-size:12px;color:var(--sub);display:inline-flex;align-items:center;gap:6px;white-space:nowrap;}
+  .arch-size select{padding:6px 8px;border:1px solid var(--line);border-radius:8px;font-size:12px;
+    background:#fff;color:var(--ink,#2B2E36);cursor:pointer;}
+  .arch-snip{font-size:11.5px;color:#6B7280;margin-top:5px;line-height:1.55;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+  mark{background:#FFF3C4;color:inherit;padding:0 1px;border-radius:3px;font-weight:600;}
+  .arch-pager{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:14px 0 4px;}
+  .arch-pager .pg-info{font-size:12px;color:var(--sub);margin-right:auto;}
+  .arch-pager button{min-width:32px;height:30px;padding:0 9px;border:1px solid var(--line);
+    border-radius:8px;background:#fff;color:#4A5060;font-size:12.5px;cursor:pointer;
+    transition:all .18s;}
+  .arch-pager button:hover:not(:disabled){border-color:#C9D2F5;background:#F7F9FE;color:#2B2E36;}
+  .arch-pager button.on{background:var(--primary,#4158D0);border-color:var(--primary,#4158D0);
+    color:#fff;font-weight:600;}
+  .arch-pager button:disabled{opacity:.42;cursor:not-allowed;}
+  .arch-pager .pg-gap{color:#B4BAC7;font-size:12px;padding:0 2px;}
+  .arch-pager .pg-jump{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--sub);}
+  .arch-pager .pg-jump input{width:52px;height:30px;text-align:center;border:1px solid var(--line);
+    border-radius:8px;font-size:12.5px;padding:0 4px;}
+
   .wx-check-row{background:#fff;border:1px solid var(--line);border-radius:9px;
     padding:9px 13px;margin-top:8px;font-size:12.5px;line-height:1.7;color:#3A3F4A;}
   .wx-check-row b{color:#20242C;}
@@ -238,7 +268,7 @@
   .edit-foot .saved{color:#1B8F5A;font-weight:600;}
   .edit-foot .dirty{color:#C0392B;font-weight:600;}
 
-  /* ---------- 最近出稿 · 操作按钮组：按动作权重分色，统一规格 ----------
+  /* ---------- 历史出稿 · 操作按钮组：按动作权重分色，统一规格 ----------
      一套色相即一套层级：翠绿=终局发布 · 琥珀=内容加工 · Slate=取用工具 · 蓝灰幽灵=只读查看 · 红幽灵=破坏性
      四个动作用四种「明度+彩度」区分，扫一眼就知道该点哪个，也不会盖过后台主 CTA */
   .issue .ops{flex-wrap:wrap;justify-content:flex-end;gap:8px;}
@@ -396,14 +426,29 @@
   </div>
 
   <div class="section-title">
-    <h3>最近出稿</h3>
+    <h3>历史出稿</h3>
     <span>
       <button class="ghost" onclick="wechatCheck(this)">微信连接体检</button>
       <span id="issue-count"></span>
     </span>
   </div>
   <div id="wx-check" style="display:none"></div>
+  <div class="arch-tools">
+    <div class="arch-search">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m15.4 15.4 4.1 4.1"/></svg>
+      <input id="arch-q" type="search" autocomplete="off" placeholder="搜索标题 / 论文原名 / 板块 / 正文关键词…"
+             oninput="onArchSearch()">
+    </div>
+    <label class="arch-size">每页
+      <select id="arch-size" onchange="onArchSize(this.value)">
+        <option value="10">10 条</option>
+        <option value="20" selected>20 条</option>
+        <option value="50">50 条</option>
+      </select>
+    </label>
+  </div>
   <div id="issues"><div class="empty">还没有成稿。点上面的「生成一期」跑一遍全流程。</div></div>
+  <div id="arch-pager" class="arch-pager"></div>
 
   <div class="panel">
     <h3>排版演示（离线示例稿，不调模型、不发微信）</h3>
@@ -510,16 +555,34 @@ const ICON = {
   trash:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.2 6.8h15.6"/><path d="M9.4 3.8h5.2"/><path d="M6.6 6.8 7.6 20h8.8l1-13.2"/><path d="M10.6 10.6v6M13.4 10.6v6"/></svg>'
 };
 
-function renderIssues(list){
+// 历史出稿的列表状态：页码 / 每页条数 / 检索词（三个入口都只改这里，重渲染统一走 loadIssues）
+const ARCH = {page:1, pages:1, pageSize:20, query:"", total:0, timer:null};
+
+// 命中高亮：先转义再按检索词包 <mark>，不区分大小写
+function hl(text, q){
+  const esc = escapeHtml(text == null ? "" : text);
+  if(!q) return esc;
+  const qe = escapeHtml(q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  if(!qe) return esc;
+  return esc.replace(new RegExp(qe, "gi"), m => `<mark>${m}</mark>`);
+}
+
+function renderIssues(list, meta){
   const box = document.getElementById("issues");
-  document.getElementById("issue-count").textContent = list.length ? `共 ${list.length} 期` : "";
+  const q = (meta && meta.query) || "";
+  const total = meta ? meta.total : list.length;
+  document.getElementById("issue-count").textContent = q
+    ? `命中 ${total} 期` : (total ? `共 ${total} 期` : "");
   if(!list.length){
-    box.innerHTML = '<div class="empty">还没有成稿。点上面的「生成一期」跑一遍全流程。</div>'; return;
+    box.innerHTML = q
+      ? `<div class="empty">没有匹配「${escapeHtml(q)}」的稿件。<br>试试更短的关键词，或换用论文原名 / 板块名（学术论文 / 业界进展 / 赛事竞赛）。</div>`
+      : '<div class="empty">还没有成稿。点上面的「生成一期」跑一遍全流程。</div>';
+    renderPager(meta); return;
   }
   box.innerHTML = list.map(x=>`
     <div class="issue">
       <div>
-        <h4>${escapeHtml(x.title || "(无标题)")}</h4>
+        <h4>${hl(x.title || "(无标题)", q)}</h4>
         <div class="sub">
           <span class="status ${x.status||""}">${statusText(x.status)}</span>
           <span>${MODULE_LABEL[x.module]||x.module}</span>
@@ -527,6 +590,7 @@ function renderIssues(list){
           ${x.rev ? `<span class="chip">已润色 ${x.rev} 版</span>` : ""}
           <span>${escapeHtml(x.issue_id||"")}</span>
         </div>
+        ${q && x.snippet ? `<div class="arch-snip">${hl(x.snippet, q)}</div>` : ""}
       </div>
       <div class="ops">
         <a href="/preview/${x.issue_id}" target="_blank" title="打开手机画框预览"><button class="op op-view">${ICON.eye}<span>预览</span></button></a>
@@ -539,18 +603,72 @@ function renderIssues(list){
         <button class="op op-del" onclick="deleteIssue('${x.issue_id}', this)" title="删除本地草稿">${ICON.trash}<span>删除</span></button>
       </div>
     </div>`).join("");
+  renderPager(meta);
+}
+
+function renderPager(meta){
+  const box = document.getElementById("arch-pager");
+  if(!box) return;
+  if(!meta || meta.pages <= 1){ box.innerHTML = ""; return; }
+  const cur = meta.page, last = meta.pages;
+  // 页码窗口：首尾 + 当前左右两页，中间用省略号
+  const keep = new Set([1, last, cur, cur-1, cur+1, cur-2, cur+2]);
+  const nums = [...keep].filter(n=>n>=1 && n<=last).sort((a,b)=>a-b);
+  let cells = "", prev = 0;
+  for(const n of nums){
+    if(prev && n - prev > 1) cells += '<span class="pg-gap">…</span>';
+    cells += `<button class="${n===cur?"on":""}" onclick="loadIssues({page:${n}})">${n}</button>`;
+    prev = n;
+  }
+  const from = (cur-1)*meta.page_size + 1, to = Math.min(cur*meta.page_size, meta.total);
+  box.innerHTML = `
+    <span class="pg-info">第 ${from}–${to} 条 / 共 ${meta.total} 条 · 第 ${cur}/${last} 页</span>
+    <button ${cur<=1?"disabled":""} onclick="loadIssues({page:${cur-1}})">上一页</button>
+    ${cells}
+    <button ${cur>=last?"disabled":""} onclick="loadIssues({page:${cur+1}})">下一页</button>
+    <span class="pg-jump">跳至<input id="arch-jump" type="number" min="1" max="${last}"
+      onkeydown="if(event.key==='Enter')archJump()">页
+      <button onclick="archJump()">前往</button></span>`;
+}
+
+function archJump(){
+  const el = document.getElementById("arch-jump");
+  const n = parseInt((el && el.value) || "", 10);
+  if(!n || n < 1) return toast("请输入要跳转的页码");
+  loadIssues({page: n});
+}
+
+async function loadIssues(opts){
+  opts = opts || {};
+  if(opts.reset) ARCH.page = 1;
+  if(opts.page) ARCH.page = Math.max(1, opts.page);
+  if(opts.pageSize) ARCH.pageSize = opts.pageSize;
+  if(typeof opts.query === "string") ARCH.query = opts.query.trim();
+  try{
+    const qs = new URLSearchParams({page: ARCH.page, page_size: ARCH.pageSize, query: ARCH.query});
+    const r = await fetch("/api/issues?" + qs.toString());
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || r.statusText);
+    ARCH.page = d.page; ARCH.pages = d.pages; ARCH.total = d.total;
+    const sel = document.getElementById("arch-size");
+    if(sel && String(ARCH.pageSize) !== sel.value) sel.value = String(ARCH.pageSize);
+    renderIssues(d.items || [], d);
+  }catch(e){ log("拉取出稿列表失败：" + e); }
+}
+
+function onArchSearch(){
+  const el = document.getElementById("arch-q");
+  clearTimeout(ARCH.timer);
+  ARCH.timer = setTimeout(()=>loadIssues({reset:true, query: el ? el.value : ""}), 280);
+}
+
+function onArchSize(v){
+  loadIssues({reset:true, pageSize: parseInt(v, 10) || 20});
 }
 function statusText(s){
   return {pushed:"已入草稿箱", rendered:"已排版", edited:"已润色·待重推", draft:"草稿", failed:"失败"}[s] || (s||"—");
 }
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-
-async function loadIssues(){
-  try{
-    const r = await fetch("/api/issues?limit=20"); const d = await r.json();
-    renderIssues(d);
-  }catch(e){ log("拉取出稿列表失败：" + e); }
-}
 
 // 重置某个模块的进度条并展开（清掉上一次的结果样式与预览链接）
 function resetRunbox(module){

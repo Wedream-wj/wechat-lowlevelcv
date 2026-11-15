@@ -984,11 +984,45 @@ def venue_short_label(venue: str, year: str = "") -> str:
     return f"{name} {yr}".strip() if yr else name
 
 
+# 预印本服务器：OpenAlex 会把 arXiv 的「host venue」写成「arXiv (Cornell University)」，
+# 这类原始串直接进信息卡会显得极不专业（读者要看的是发表期刊，不是托管机构）；
+# 更关键的是——它会让「仅预印本」的稿子在标题上挂着 arXiv 前缀，与信誉度铁律冲突。
+_PREPRINT_VENUE_RE = re.compile(
+    r"arxiv|corne?ll university|preprint|ssrn|research\s*square|biorxiv|medrxiv|"
+    r"techrxiv|chemrxiv|openreview", re.I)
+
+
+def is_preprint_venue(venue: str) -> bool:
+    """这个 venue 是不是「预印本托管方」而非正式收录机构。"""
+    return bool(_PREPRINT_VENUE_RE.search(str(venue or "")))
+
+
+def preprint_label(venue: str) -> str:
+    return "arXiv 预印本" if "arxiv" in str(venue or "").lower() else "预印本（未经同行评议）"
+
+
+# 数据库返回的 venue 常带卷期/页码/DOI 尾巴：
+# 「Pattern Recognition, 177 (2026) 113339. doi:10.1016/j.patcog.2026.113339」
+# 信息卡只该出现期刊本身，卷号与 DOI 属于引用信息，塞进来会挤成两行。
+_VENUE_TAIL_DOI_RE = re.compile(r"\s*(?:[;,.]\s*)?(?:doi\s*[:：]|https?://(?:dx\.)?doi\.org/).*$",
+                                re.I)
+_VENUE_VOLUME_RE = re.compile(r",?\s*\b\d{1,4}\s*\(\s*(?:19|20)\d{2}\s*\)\s*[\dA-Za-z\-–]*\.?\s*$")
+
+
+def clean_venue(venue: str) -> str:
+    """去掉卷期/页码/DOI 尾巴，只留期刊或会议名。"""
+    raw = _VENUE_TAIL_DOI_RE.sub("", str(venue or ""))
+    raw = _VENUE_VOLUME_RE.sub("", raw)
+    return raw.strip(" ,，.。;；")
+
+
 def venue_card_label(venue: str, year: str = "") -> str:
     """信息卡的期刊/会议行：全称在前、简称跟括号里，兼顾专业度与可检索性。"""
-    raw = str(venue or "").strip()
+    raw = clean_venue(venue)
     if not raw:
         return str(year or "").strip()
+    if is_preprint_venue(raw):
+        return preprint_label(raw)
     ab = venue_abbrev(raw)
     if not ab:
         return f"{raw} {year}".strip() if year and not _VENUE_YEAR_RE.search(raw) else raw
