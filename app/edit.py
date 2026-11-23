@@ -14,6 +14,7 @@ contenteditable 吐出来的是语义标签（p / ul / table），直接推过�
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,12 @@ from .render.md_parse import parse_markdown
 from .render.preview import render_preview
 from .render import wechat
 from .sources import MODULE_LABEL
+from .spec_tools import (
+    _PAPER_META_LABELS,
+    _meta_kind,
+    is_placeholder_authors,
+    strip_placeholder_meta_rows,
+)
 
 MAX_MARKDOWN = 200_000  # 一期推文 1 万字级别，20 万字符足够挡住误粘贴的整本书
 
@@ -166,18 +173,142 @@ def cover_relative(article: Article) -> str:
         return path.as_posix()
 
 
+# 信息卡在 Markdown 里是「- **作者团队**：值」形式的列表行；值里含不出人名
+# （「由论文作者团队共同完成」之流）就整行删掉——落库的 md 与渲染出的 HTML 必须一致。
+_META_AUTHOR_LINE_RE = re.compile(
+    r"^\s*[-*]\s*\*\*\s*(?:作者团队|论文作者|作者信息|作者)\s*\*\*\s*[：:]\s*(.+?)\s*$")
+
+
+def drop_fake_author_rows(markdown: str) -> tuple[str, int]:
+    """删掉 Markdown 信息卡里的废话作者行，返回 (新文本, 删除行数)。"""
+    lines = (markdown or "").splitlines()
+    kept: list[str] = []
+    dropped = 0
+    for line in lines:
+        m = _META_AUTHOR_LINE_RE.match(line)
+        if m and is_placeholder_authors(m.group(1)):
+            dropped += 1
+            continue
+        kept.append(line)
+    return "\n".join(kept), dropped
+
+
+# 历史稿的信息卡行名五花八门（论文标题 / 期刊/会议 / 发表状态），与现行
+# 三行正式行名不一致：读者肉眼看不出来，检索与字段抽取会漏。这里在「保存」
+# 与「存量整理」两个入口统一收敛，值一个字不动。
+_META_LINE_RE = re.compile(
+    r"^\s*[-*]\s*\*\*\s*(?P<label>[^*]{1,24}?)\s*\*\*\s*[：:]\s*(?P<value>.*?)\s*$")
+_META_ORDER = {canonical: i for i, (canonical, _a) in enumerate(_PAPER_META_LABELS)}
+
+
+def _paper_meta_span(lines: list[str]) -> tuple[int, int] | None:
+    """定位开篇信息卡（首个 h2 之前的连续列表块）；不是论文信息卡返回 None。"""
+    first_h2 = next((i for i, line in enumerate(lines) if line.startswith("## ")), len(lines))
+    run: list[int] = []
+    for i in range(first_h2):
+        if _META_LINE_RE.match(lines[i]):
+            run.append(i)
+            continue
+        if run:
+            break
+    if not run:
+        return None
+    if not any(_meta_kind(_META_LINE_RE.match(lines[i]).group("label")) for i in run):
+        return None
+    return run[0], run[-1] + 1
+
+
+def normalize_meta_card_lines(markdown: str, module: str = "paper") -> tuple[str, list[str]]:
+    """信息卡行名归一 + 三行必选项置顶（只改标签与行序，值原样保留）。
+
+    返回 (新文本, 变更说明)。非论文模块、没有信息卡、或行名已经规范时原样返回。
+    """
+    text = str(markdown or "")
+    if module != "paper" or not text.strip():
+        return text, []
+    lines = text.splitlines()
+    span = _paper_meta_span(lines)
+    if span is None:
+        return text, []
+    start, end = span
+
+    changes: list[str] = []
+    rows: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for line in lines[start:end]:
+        m = _META_LINE_RE.match(line)
+        label, value = m.group("label").strip(), m.group("value").strip()
+        canonical = _meta_kind(label)
+        if canonical:
+            if canonical in seen:
+                changes.append(f"删重复行「{label}」")
+                continue
+            seen.add(canonical)
+            if label != canonical:
+                changes.append(f"行名「{label}」→「{canonical}」")
+                label = canonical
+        rows.append((label, value, canonical))
+
+    head = sorted((r for r in rows if r[2]), key=lambda r: _META_ORDER[r[2]])
+    rest = [r for r in rows if not r[2]]
+    ordered = head + rest
+    if [r[0] for r in ordered] != [r[0] for r in rows]:
+        changes.append("信息卡三行置顶排序")
+    if not changes:
+        return text, []
+
+    block = [f"- **{label}**：{value}" for label, value, _c in ordered]
+    new_text = "\n".join(lines[:start] + block + lines[end:])
+    if text.endswith("\n"):
+        new_text += "\n"
+    return new_text, changes
+
+
 def render_edit(article: Article, markdown: str) -> EditResult:
     """只排版不落库（编辑器实时预览用）。markdown 为空直接报错，不写空稿。"""
+    from . import tables_guard
+
     text = (markdown or "").replace("\r\n", "\n").strip()
     if not text:
         raise ValueError("Markdown 内容为空，拒绝用空稿覆盖原文")
     if len(text) > MAX_MARKDOWN:
         raise ValueError(f"Markdown 超过 {MAX_MARKDOWN} 字符上限，请分批整理")
+    text, dropped = drop_fake_author_rows(text)
+    text, _label_changes = normalize_meta_card_lines(text, article.module)
+    # Ours 零留白：人工保存前先按原文表把残缺行补回来（补不了就撤表改文字），
+    # 保证「保存成功的稿子」永远不会带着一行全是「—」的本文方法数据。
+    paper_item = next((i for i in (article.items or [])
+                       if getattr(i, "module", "") == "paper"), None)
+    if article.module == "paper" and paper_item is not None:
+        text, _ours_fixed = tables_guard.repair_markdown_tables(
+            text, paper_item, drop_unfixable=False)
     spec, figures = parse_markdown(text + "\n")
+    if strip_placeholder_meta_rows(spec):      # 卡片形态兜底：废话行 / 占位值一律清掉
+        dropped += 1
+    _assert_ours_rows_filled(spec)
     assert_tables_stable(spec, figures)  # 数据对齐契约：错位的表进不了库
     body = wechat.render_body(spec, figures, article.module, _date_str(article))
     return EditResult(issue_id=article.issue_id, html=body, markdown=text + "\n",
                       spec=spec, figures=figures)
+
+
+def _assert_ours_rows_filled(spec: dict) -> None:
+    """保存侧断言：任何一张表里，本文方法那一行/列都不许整行空着。
+
+    回填逻辑已经先跑过一遍；走到这里还空着，只可能是人工新贴了一张残缺表——
+    宁可拒绝保存并说清怎么改，也不让「Ours 全是 —」的稿子进库、推出去。
+    """
+    from .tables_guard import ours_gap
+
+    for idx, table in enumerate(_table_blocks(spec), start=1):
+        gap = ours_gap(table.get("header") or [], table.get("rows") or [])
+        if not gap:
+            continue
+        where = "那一行" if gap["kind"] == "blank_row" else "那一列"
+        raise ValueError(
+            f"第 {idx} 张表格里代表本文方法的{where}没有任何数据（{'—' if gap['kind'] == 'blank_row' else '空列'}）。"
+            "实验表格的 Ours 数据是全文证据的锚点，按零留白铁律拒绝保存："
+            "请补上原文数值，或直接删掉这张表、改用一句话说明原文表格。")
 
 
 def save_edit(article: Article, markdown: str) -> dict:

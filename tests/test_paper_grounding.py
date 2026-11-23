@@ -270,7 +270,8 @@ class TestPreprintVenue(unittest.TestCase):
         self.assertEqual(venue_card_label("arXiv (Cornell University)", "2026"), "arXiv 预印本")
         self.assertEqual(venue_card_label("arXiv.org", "2026"), "arXiv 预印本")
         self.assertEqual(venue_card_label("SSRN Electronic Journal"), "预印本（未经同行评议）")
-        self.assertEqual(venue_card_label("Pattern Recognition", "2026"), "Pattern Recognition（PR）")
+        self.assertEqual(venue_card_label("Pattern Recognition", "2026"),
+                         "Pattern Recognition 2026（PR）")
 
     def test_title_prefix_stripped_for_preprint(self):
         from app.llm.prompts import enforce_title_rules

@@ -49,11 +49,13 @@ from .llm.title_audit import (
 )
 from .models import Article, Item
 from .render import cover as cover_mod
+from .render import cover_guard
 from .render import cover_select
 from .render import wechat
 from .render.markdown import spec_to_markdown
 from .render.preview import render_preview
 from .sources import MODULE_LABEL, arxiv, collect
+from .sources import authors as _authors
 from .sources import chinese_media as _chinese_media
 from .sources import competitions as _competitions
 from .sources import cvf
@@ -62,6 +64,7 @@ from .sources import paper_pdf as _paper_pdf
 from .sources import paper_search as _paper_search
 from .sources import publication as _publication
 from .sources.base import HttpClient
+from . import tables_guard
 from .spec_tools import (
     MAX_TABLE_COLS,
     ensure_paper_arch_figure,
@@ -80,6 +83,7 @@ from .spec_tools import (
     scrub_process_narration,
     scrub_reader_burden,
     strip_countdown_title,
+    strip_placeholder_meta_rows,
 )
 
 DATE_FMT = "%Y.%m.%d"
@@ -557,6 +561,30 @@ async def run_module(module: str, *, publish: bool | None = None,
                                 _log(f"发表状态：{item.title[:24]} 检索确认仅 arXiv 预印本，标题将不带 arXiv 标签")
                         else:
                             _log(f"发表状态：{item.title[:24]} 未能查证（{pub.get('reason', '')}），按保守规则处理")
+            # 作者补全（指定论文 / 榜单来源都走这里）：榜单页只给标题和链接，authors
+            # 常年为空。信息卡「作者团队」写不出人名只能整行省略，先按 arXiv → OpenAlex
+            # → Crossref 的可信度顺序补；三条通道都命中不了就老实缺这一行，绝不写废话。
+            if module == "paper" and selected:
+                missing = [i for i in selected if not (i.authors or [])]
+                if missing:
+                    report("配图", 41, "补全论文作者署名…", True)
+                for item in missing:
+                    try:
+                        got = await asyncio.wait_for(
+                            _authors.resolve_authors(
+                                client, item.title, _authors.arxiv_id_of(item),
+                                str(item.extra.get("doi") or "")),
+                            timeout=25.0)
+                    except Exception:
+                        got = {}
+                    names = got.get("authors") or []
+                    if names:
+                        item.authors = names
+                        _log(f"作者补全：{item.title[:24]} 取到 {len(names)} 位"
+                             f"（{got.get('source')}，{names[0]} 等）")
+                    else:
+                        _log(f"作者补全：{item.title[:24]} 多源均无可靠人名，"
+                             "信息卡将省略「作者团队」行（宁缺毋滥）")
             report("配图", 42, "下载与整理配图…", True)
             # 业界稿：量子位首页只有一句摘要，入选后回抓正文，否则写出来全是空泛判断
             if module == "industry" and selected:
@@ -679,6 +707,7 @@ async def run_module(module: str, *, publish: bool | None = None,
         # 不给目标论文，模型会正文写 A、信息卡填 B（2026-11-14 DeLang-SR 事故）。
         # 选中规则：素材最全（有图有表）> 分数最高；只有一篇时就是它。
         paper_focus = None
+        ours_note = ""
         if module == "paper" and selected:
             paper_focus = max(
                 selected,
@@ -686,6 +715,14 @@ async def run_module(module: str, *, publish: bool | None = None,
             )
             _log(f"本篇权威信源锁定：{paper_focus.title[:52]}"
                  f"（{len(paper_focus.authors or [])} 位作者；其余候选只作对比背景）")
+            # 动笔前的前置断言：素材里必须有「本文方法有数」的表。没有就明确改口径——
+            # 宁可写一句「定量指标见原文 Table N」，也不许模型顺手补一行「Ours | —」。
+            material_tables = [t for t in ((paper_focus.extra or {}).get("tables") or [])
+                               if isinstance(t, dict)]
+            if not tables_guard.has_ours_data(
+                    tables_guard.usable_tables(material_tables, paper_focus), paper_focus):
+                ours_note = prompts.OURS_MISSING_NOTE
+                _log("表格断言：素材缺本文方法数值 → 本节改文字说明原文表格，禁止输出空表")
         try:
             report("成稿", 50, f"调用大模型成稿（{llm.mode}）…", True)
 
@@ -702,7 +739,7 @@ async def run_module(module: str, *, publish: bool | None = None,
 
             spec = await llm.write(module, selected, figures, date_str, on_progress=on_llm,
                                    variant=variant if module == "contest" else None,
-                                   focus=paper_focus)
+                                   focus=paper_focus, extra_instruction=ours_note)
             # 表格里的数字必须能在素材里找到；素材里一个数字都没有时，出现表格更是编的。
             # 素材有数据却写成「无法量化」也要补写。
             if module == "paper" and llm.enabled:
@@ -711,7 +748,7 @@ async def run_module(module: str, *, publish: bool | None = None,
                 for tok in unsupported_prose_numbers(spec, selected):
                     if tok not in bad_numbers:
                         bad_numbers.append(tok)
-                if bad_numbers or (has_numbers and thin_evidence(spec)):
+                if bad_numbers or (has_numbers and thin_evidence(spec) and not ours_note):
                     if bad_numbers:
                         report("成稿", 86, "首稿实验解读里的数字对不上素材，要求照抄原文重写…", True)
                         _log("首稿含素材中找不到的数字：" + "、".join(bad_numbers[:6]))
@@ -719,10 +756,14 @@ async def run_module(module: str, *, publish: bool | None = None,
                         report("成稿", 86, "首稿没引用实验数值，要求模型补写量化对比…", True)
                         _log("首稿 03/04 节缺少数值证据，带补写指令重写一次")
                     try:
+                        retry_note = quant_retry_instruction(bad_numbers, has_numbers)
+                        if ours_note:
+                            # 素材本来就没有 Ours 数值：补写指令也不能逼模型造表
+                            retry_note = retry_note + "\n\n" + ours_note
                         spec = await llm.write(
                             module, selected, figures, date_str,
                             on_progress=on_llm,
-                            extra_instruction=quant_retry_instruction(bad_numbers, has_numbers),
+                            extra_instruction=retry_note,
                             focus=paper_focus,
                         )
                         dropped = drop_unsupported_tables(spec, selected)
@@ -860,6 +901,8 @@ async def run_module(module: str, *, publish: bool | None = None,
                 _log(f"信息卡三行已按目标论文逐字重绑（{bound['fixed']} 处）"
                      + (f"，缺权威依据的行已删除：{'、'.join(bound['removed'])}"
                         if bound["removed"] else ""))
+            if strip_placeholder_meta_rows(spec):
+                _log("信息卡废话行已清除：作者栏写不出具体人名 / 占位值 → 整行删除（宁缺毋滥）")
             if scrub_paper_author_grammar(spec):
                 _log("作者表述已改写为「由 A、B 等人组成」（「来自 + 人名」是语法硬伤）")
             problems = paper_grounding.assert_paper_meta(spec, target)
@@ -878,12 +921,22 @@ async def run_module(module: str, *, publish: bool | None = None,
             # 补图补表同样按**目标论文**取素材：正文写 A、图表却从 B 里补，是同一类错位
             if ensure_paper_arch_figure(spec, target, figures):
                 _log("「核心创新与方法拆解」已补入模型架构图（原稿缺 figure 块）")
+            # 实验表格 Ours 零留白闸门：模型给出的表里本文方法那一行整行空着（或
+            # 干脆没有本文方法）→ 按原文表逐格回填；原文也没有数值就撤表改文字。
+            # 放在补表之前：先把残缺表修好，后面就不会因为「已经有 table 块」而漏补。
+            ours_fixed = tables_guard.repair_spec_tables(spec, target, log=_log)
+            if ours_fixed:
+                _log(f"实验表格零留白闸门：处理 {ours_fixed} 张 Ours 残缺表")
             if ensure_paper_result_table(spec, target):
                 _log("「关键实验结果解读」已补入论文原表（原稿缺 table 块）")
+            material_tables = [t for t in ((target.extra or {}).get("tables") or [])
+                               if isinstance(t, dict)]
+            table_required = tables_guard.has_ours_data(
+                tables_guard.usable_tables(material_tables, target), target)
             # 图表红线：补完之后仍然缺图又缺表，说明素材本身就没取到可解析内容——
             # 这种稿子发出去就是纯文字通稿，直接报因不出稿；
             # 只缺一样则如实降级，绝不编图、不造表、不臆造数字。
-            gaps = paper_asset_gaps(spec, figures)
+            gaps = paper_asset_gaps(spec, figures, table_required=table_required)
             if gaps["figure"] and gaps["table"]:
                 raise PipelineError(
                     "论文图表红线未达标：核心创新节无结构图、实验结果节无对比表，"
@@ -960,6 +1013,7 @@ async def run_module(module: str, *, publish: bool | None = None,
         # （实测一期里它跳过并列 22 分的 TinySR，选了 Real-IISR 深挖），
         # 主角排到首位后 order==0 才真正等于「文章写谁、封面就是谁」。
         pick = None
+        featured = None
         cover_items = list(selected)
         # industry 一期常含多条动态、主线只深挖一条：封面同样必须跟着成稿头条走，
         # 否则「正文写 Momenta 芯片、封面却是别家发布会」的图文不搭会直接劝退读者
@@ -977,14 +1031,28 @@ async def run_module(module: str, *, publish: bool | None = None,
             _log("封面选图超时（>120s），本期使用品牌底图")
         except Exception as exc:      # 选图只是锦上添花，任何异常都不该阻断出稿
             _log(f"封面选图异常，改用品牌底图：{type(exc).__name__}: {exc}")
+
+        # 【封面图与正文 100% 强一致】生成前一致性检查：hero 的归属标签必须与
+        # 成稿标题 / 核心方法对齐。不匹配绝不强行凑数——退回品牌底图（封面文字
+        # 就是本期标题，天然一致），并把拦截原因写进日志与归属标签。
+        cover_check = cover_guard.check_pick_consistency(
+            spec, pick, featured_item=featured, other_items=selected)
+        if not cover_check.ok:
+            _log(f"封面一致性拦截：{cover_check.reason}；改用品牌底图")
+            pick = None
+
         if pick:
             _log(f"封面：{pick.describe()}")
         elif module == "contest":
             # 赛事稿的「非强求」：官方视觉与相关生态图都没检索到，就退品牌底图。
             # 这不是失败——流水线必须照常出稿，也不许为凑封面抓一张无关图。
             _log("封面：未检索到官方/相关视觉，按「不强求」使用品牌底图（不影响出稿）")
+        elif not cover_check.ok:
+            pass                      # 已记拦截原因，不再重复打「没达到阈值」
         else:
             _log("封面：素材里没有达到阈值的图，使用品牌底图")
+        # 默认文件名带成稿标题指纹：同日多篇绝不共用路径（VideoGigaGAN 被 SR4IR
+        # 覆盖的事故），显式 out_path 只在定向修复 / verify 时用。
         cover_path = cover_mod.make_cover(spec, module, date_str,
                                           hero=pick.path if pick else None,
                                           hero_fit=pick.fit if pick else "cover")
@@ -1011,6 +1079,11 @@ async def run_module(module: str, *, publish: bool | None = None,
         else:
             issue_id = db.save_article(article)
             db.mark_used(selected, issue_id)
+
+        # 归属标签 sidecar：记录「这张封面属于哪篇文章、核心方法、期号」。
+        # 复用 / 预览 / 推送前用 verify_ownership 复核，杜绝跨篇串图。
+        cover_guard.write_ownership(cover_path, spec, pick, cover_check.identity,
+                                    issue_id=issue_id)
 
         preview = render_preview(
             spec,
@@ -1070,6 +1143,13 @@ async def push_issue(issue_id: str, *, attrs: "PublishAttrs | None" = None) -> A
     article = db.get_article(issue_id)
     if not article:
         raise PipelineError(f"找不到期号 {issue_id}")
+
+    # 【封面图与正文 100% 强一致】推送前归属复核：封面 sidecar 若标明属于
+    # 另一篇文章（同日多期覆盖事故），宁可拒推也不把张冠李戴的图发到微信端。
+    if article.cover_path:
+        owned = cover_guard.verify_ownership(article.cover_path, {"title": article.title})
+        if not owned.ok:
+            raise PipelineError(f"封面一致性闸门：{owned.reason}；请重新生成封面后再推草稿")
 
     attrs = attrs or PublishAttrs.from_settings()
 

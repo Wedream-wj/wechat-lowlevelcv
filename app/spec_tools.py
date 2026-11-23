@@ -929,6 +929,18 @@ def normalize_meta_cards(spec: dict, module: str) -> int:
 # 键统一小写、连字符统一为「-」；按长度降序匹配，避免「Pattern Recognition Letters」
 # 先被「Pattern Recognition」截断。
 _VENUE_ABBREV: dict[str, str] = {
+    # 会议全称（Crossref 的历史名/冗长名常被截断，键按子串匹配，长键优先）
+    "ieee computer society conference on computer vision and pattern recognition": "CVPR",
+    "ieee/cvf conference on computer vision and pattern recognition": "CVPR",
+    "ieee conference on computer vision and pattern recognition": "CVPR",
+    "conference on computer vision and pattern recognition": "CVPR",
+    "ieee international conference on computer vision": "ICCV",
+    "european conference on computer vision": "ECCV",
+    "ieee/cvf winter conference on applications of computer vision": "WACV",
+    "international conference on learning representations": "ICLR",
+    "international conference on machine learning": "ICML",
+    "advances in neural information processing systems": "NeurIPS",
+    "neural information processing systems": "NIPS",
     "ieee transactions on pattern analysis and machine intelligence": "TPAMI",
     "ieee transactions on circuits and systems for video technology": "TCSVT",
     "ieee transactions on neural networks and learning systems": "TNNLS",
@@ -951,10 +963,19 @@ _SHORT_VENUES = {v.upper() for v in _VENUE_ABBREV.values()} | {
     "CVPR", "ICCV", "ECCV", "NEURIPS", "NIPS", "ICML", "ICLR", "AAAI", "IJCAI",
     "SIGGRAPH", "MM", "BMVC", "WACV", "MICCAI", "ICIP", "ICASSP", "3DV",
 }
+# 学术圈通用写法不是全大写（NeurIPS / 3DV）：简称比对用小写，展示用这张表。
+_VENUE_DISPLAY = {"NEURIPS": "NeurIPS", "NIPS": "NeurIPS"}
 _VENUE_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+# 全称自带的括注简称：「European Conference on Computer Vision (ECCV)」「… Expo (ICME)」
+_PAREN_ABBREV_RE = re.compile(r"[（(]\s*([A-Z][A-Za-z&.\-]{1,9})\s*[)）]")
 # 标题开头的「简称 + 年份 + 分隔符」：用于把「PR 2026｜X」统一成「PR 2026 | X」
 _LEAD_VENUE_LABEL_RE = re.compile(
     r"^\s*([A-Za-z][A-Za-z&.\-]{1,14})\s*[,，]?\s*((?:19|20)\d{2})?\s*[|｜:：]\s*")
+
+
+def _display_abbrev(name: str) -> str:
+    up = str(name or "").strip().upper()
+    return _VENUE_DISPLAY.get(up, up)
 
 
 def venue_abbrev(venue: str) -> str:
@@ -965,10 +986,14 @@ def venue_abbrev(venue: str) -> str:
     if not text:
         return ""
     if text.upper() in _SHORT_VENUES:
-        return text.upper()
+        return _display_abbrev(text)
     for key in _VENUE_KEYS:
         if key in text.lower():
             return _VENUE_ABBREV[key]
+    # 全称里自带括注简称（ECCV / ICME 这类本表未收录的会议）：直接采信作者的写法
+    m = _PAREN_ABBREV_RE.search(text)
+    if m:
+        return _display_abbrev(m.group(1))
     return ""
 
 
@@ -1009,26 +1034,42 @@ _VENUE_TAIL_DOI_RE = re.compile(r"\s*(?:[;,.]\s*)?(?:doi\s*[:：]|https?://(?:dx
 _VENUE_VOLUME_RE = re.compile(r",?\s*\b\d{1,4}\s*\(\s*(?:19|20)\d{2}\s*\)\s*[\dA-Za-z\-–]*\.?\s*$")
 
 
+_VENUE_NOISE_RES = (
+    re.compile(r"/\s*proceedings.*$", re.I),                 # "…/Proceedings - IEEE …"
+    re.compile(r"\s[-–—]\s*(?:ieee|springer|acm|wiley|elsevier).*$", re.I),
+    re.compile(r"^proceedings(?:\s+of\s+the)?\s+", re.I),   # "Proceedings of the …"
+)
+
+
 def clean_venue(venue: str) -> str:
-    """去掉卷期/页码/DOI 尾巴，只留期刊或会议名。"""
+    """去掉卷期/页码/DOI 尾巴与出版商附录（/Proceedings - IEEE …），只留会议名。"""
     raw = _VENUE_TAIL_DOI_RE.sub("", str(venue or ""))
     raw = _VENUE_VOLUME_RE.sub("", raw)
+    for noise in _VENUE_NOISE_RES:
+        raw = noise.sub("", raw)
     return raw.strip(" ,，.。;；")
 
 
 def venue_card_label(venue: str, year: str = "") -> str:
-    """信息卡的期刊/会议行：全称在前、简称跟括号里，兼顾专业度与可检索性。"""
+    """信息卡的期刊/会议行：全称 + 年份 + 括注简称（「Pattern Recognition 2026（PR）」）。
+
+    只有简称的素材（CVPR / NeurIPS）也补齐年份：卡片是检索入口，缺年份等于缺一半信息。
+    """
     raw = clean_venue(venue)
     if not raw:
         return str(year or "").strip()
     if is_preprint_venue(raw):
         return preprint_label(raw)
+    m = _VENUE_YEAR_RE.search(raw)
+    yr = m.group(0) if m else str(year or "").strip()
     ab = venue_abbrev(raw)
     if not ab:
-        return f"{raw} {year}".strip() if year and not _VENUE_YEAR_RE.search(raw) else raw
-    if re.search(rf"(?<![A-Za-z]){re.escape(ab)}(?![A-Za-z])", raw, re.I):
-        return raw
-    return f"{raw}（{ab}）"
+        return raw if _VENUE_YEAR_RE.search(raw) or not yr else f"{raw} {yr}"
+    base = _PAREN_ABBREV_RE.sub(" ", raw)
+    base = re.sub(r"\s{2,}", " ", _VENUE_YEAR_RE.sub(" ", base)).strip(" ,，()（）")
+    if not base or base.lower() == ab.lower():
+        return f"{ab} {yr}".strip()
+    return f"{base} {yr}（{ab}）".strip()
 
 
 def abbrev_title_venue(title: str) -> str:
@@ -1060,7 +1101,7 @@ def abbrev_title_venue(title: str) -> str:
         break
     m = _LEAD_VENUE_LABEL_RE.match(out)
     if m and m.group(1).upper() in _SHORT_VENUES:
-        label = m.group(1).upper()
+        label = _display_abbrev(m.group(1))
         if m.group(2):
             label = f"{label} {m.group(2)}"
         out = f"{label} | {out[m.end():].strip()}"
@@ -1072,7 +1113,8 @@ def abbrev_title_venue(title: str) -> str:
 # 行名的历史写法五花八门（论文标题、期刊/会议、作者…），统一收敛到下面三个正式行名。
 _PAPER_META_LABELS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("论文名称", ("论文名称", "论文标题", "论文题目", "论文名", "标题")),
-    ("发表期刊/会议", ("发表期刊/会议", "期刊/会议", "发表期刊", "发表会议", "期刊", "会议", "收录", "venue")),
+    ("发表期刊/会议", ("发表期刊/会议", "期刊/会议", "发表期刊", "发表会议", "期刊", "会议",
+                       "收录", "发表状态", "venue")),
     ("作者团队", ("作者团队", "作者", "论文作者", "作者列表", "作者信息")),
 )
 
@@ -1082,9 +1124,130 @@ _META_LABEL_PREFIX_RE = re.compile(r"^[0-9０-９一二三四五六七八九十]
 
 # 信息卡里的占位值（「官方未公布」之流）不算信息，整行删掉：读者要的是能检索的事实。
 _PLACEHOLDER_VALUE_RE = re.compile(
-    r"^(?:官方)?\s*(?:未公布|未披露|未提供|未注明|未提及|未知|待定|待补充|暂无|无|n/?a|[-—–…]+)\s*[。.]?$",
+    r"^(?:官方)?\s*(?:未公布|未披露|未提供|未注明|未提及|未知|待定|待补充|暂无|无|n/?a|[-—–…]+"
+    r"|以原文标注为准|详见原文|详见论文)\s*[。.]?$",
     re.I,
 )
+
+
+# ------------------------------------------------------------------ 作者署名（零废话）
+# 作者的唯一合法形态是**具体人名**：「由论文作者团队共同完成」「由 XX 研究团队共同完成」
+# 「由多位居者共同完成」这类废话比缺行更伤专业度——读者拿它检索不到任何东西。
+# 因此这里只认两种形态：西文「名 + 姓」（含中间名 / 缩写点 / 连字符）、中文 2–4 字姓名。
+# 用 \w 而不是 [A-Za-z]：欧美人名里的 ø / ü / é / ł（August Leander Høeg）必须留住，
+# 按 ASCII 匹配会把整条名字判成「不像人名」而丢掉首作者。
+_PERSON_NAME_RE = re.compile(
+    r"^(?:[A-Z][\w'’\-]*(?:\s+(?:[A-Z]\.|[A-Z][\w'’\-]*)){1,3}"
+    r"|[\u4e00-\u9fa5]{2,4})$")
+# 「姓氏, 名」的倒装写法（OpenAlex / Crossref 偶发）：Chen, Junyang → Junyang Chen
+_SURNAME_FIRST_RE = re.compile(r"^([A-Z][\w'’\-]+)\s*,\s*([A-Z][\w'’.\- ]{1,40})$")
+# 模板化收尾：「等研究人员共同完成」「等人组成」「共同完成」「等」
+_AUTHOR_TAIL_RE = re.compile(
+    r"(?:\s*[，,]?\s*(?:等\s*(?:人|研究人员|作者|学者)?\s*(?:共同)?\s*(?:完成|组成|撰写|合作)?"
+    r"|共同完成|等人|等))\s*[。.]*$")
+# 模板化开头：「本文由」「作者团队由」「研究团队」…
+_AUTHOR_HEAD_RE = re.compile(
+    r"^\s*(?:(?:本文|该论文|论文|本文作者|作者团队|论文作者|研究团队|研究组|作者们|作者)\s*)?"
+    r"(?:是|系)?\s*(?:由|来自)?\s*")
+_NON_PERSON_WORDS = {
+    "研究团队", "作者团队", "研究小组", "研究组", "课题组", "论文作者", "作者", "团队",
+    "实验室", "研究所", "研究院", "大学", "学院", "公司", "中心", "机构", "研究者", "学者",
+}
+
+
+def _normalize_person_name(text: str) -> str:
+    """把一条作者条目规范成「名 姓」；不像人名的返回空串（由调用方丢弃）。"""
+    s = re.sub(r"\s+", " ", str(text or "").strip(" \t、，,;；:："))
+    s = re.sub(r"^(?:由|by|from)\s+", "", s, flags=re.I)
+    if not s or s.lower() in _NON_PERSON_WORDS:
+        return ""
+    m = _SURNAME_FIRST_RE.match(s)
+    if m:
+        s = f"{m.group(2).strip()} {m.group(1)}"
+    if not _PERSON_NAME_RE.match(s):
+        return ""
+    if s.replace(" ", "") in _NON_PERSON_WORDS:
+        return ""
+    return s
+
+
+def clean_author_names(values) -> list[str]:
+    """作者列表清洗：只留像人名的条目，去重保序（废话条目直接消失）。"""
+    out: list[str] = []
+    for raw in values or []:
+        name = _normalize_person_name(raw)
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
+def parse_author_names(text: str) -> list[str]:
+    """从任意书写形态里抽出真实人名：「由 A、B 等人组成」「A, B and C」都行。
+
+    抽不出任何人名（例如「由论文作者团队共同完成」）= 这一行没有信息量，返回 []。
+    """
+    body = str(text or "").strip()
+    if not body:
+        return []
+    body = _AUTHOR_HEAD_RE.sub("", body)
+    body = _AUTHOR_TAIL_RE.sub("", body)
+    # 顿号是中文写法的首选分隔符；只有整段没有顿号时才按逗号切——
+    # 否则「Chen, Junyang」这种「姓, 名」倒装会被错误拆成两个人。
+    splitter = r"[、，;；/]" if "、" in body else r"[,，;；/]"
+    parts = re.split(splitter + r"|(?:\s+(?:and|&)\s+)", body)
+    return clean_author_names(parts)
+
+
+def format_authors_line(authors, limit: int = 6) -> str:
+    """信息卡作者行的唯一写法：真实人名清单，逗号分隔，超过 6 人加「等」。
+
+    例如「Weihang Kong, Jienan Shen, He Li」。一个可用的人名都拿不到时返回空串——
+    调用方据此**删掉整行**，绝不用「由论文作者团队共同完成」这类废话凑数。
+    """
+    names = clean_author_names(authors)
+    if not names:
+        return ""
+    shown = names[:limit]
+    return ", ".join(shown) + (" 等" if len(names) > limit else "")
+
+
+def is_placeholder_authors(text: str) -> bool:
+    """这一行作者值是不是废话/占位（含不出一位真实人名）。"""
+    return not parse_author_names(text)
+
+
+def _authors_line(authors: list) -> str:
+    """信息卡的作者团队行值：只写具体人名，取不到就留空（整行省略）。"""
+    return format_authors_line(authors)
+
+
+def strip_placeholder_meta_rows(spec: dict) -> int:
+    """删除信息卡里的废话行：作者含不出人名、或值是「以原文标注为准」这类占位。
+
+    与「补行」相配套的守门人——补行只能补事实，已有的假信息一律清掉。
+    返回删除的行数。
+    """
+    sections = spec.get("sections")
+    if not isinstance(sections, list):
+        return 0
+    removed = 0
+    for card in sections:
+        if not isinstance(card, dict) or card.get("type") != "meta_card":
+            continue
+        rows = [r for r in (card.get("rows") or []) if isinstance(r, (list, tuple)) and len(r) >= 2]
+        kept: list[list] = []
+        for row in rows:
+            label, value = str(row[0]), str(row[1]).strip()
+            if _meta_kind(label) == "作者团队" and is_placeholder_authors(value):
+                removed += 1
+                continue
+            if _PLACEHOLDER_VALUE_RE.match(value):
+                removed += 1
+                continue
+            kept.append(list(row))
+        if removed:
+            card["rows"] = kept
+    return removed
 
 
 def _meta_kind(label: str) -> str:
@@ -1097,30 +1260,53 @@ def _meta_kind(label: str) -> str:
 
 
 def _authors_line(authors: list) -> str:
-    """信息卡的作者团队行：固定写成「由 A、B、C 等研究人员共同完成」。
+    """信息卡的作者团队行值：只写具体人名，取不到就留空（整行省略）。"""
+    return format_authors_line(authors)
 
-    裸人名列表读起来像通讯录，且模型偶尔写成「作者团队来自 A、B」（人名挂「来自」后
-    是语法硬伤）；这里直接落成唯一合法句式，超过 6 人只列前 6 位。
+
+def _venue_source(item) -> tuple[dict, str, str]:
+    """素材的 venue 事实：(查证记录, venue 原始串, 年份)。查证记录优先于榜单页标注。"""
+    extra = getattr(item, "extra", None) or {}
+    pub = extra.get("publication") or {}
+    venue = str(pub.get("venue") or getattr(item, "venue", "") or "").strip()
+    year = str(pub.get("year") or getattr(item, "year", "") or "").strip()
+    return pub, venue, year
+
+
+def item_venue_label(item) -> str:
+    """信息卡「发表期刊/会议」行的权威写法；空串＝无法确定，整行省略。
+
+    只用「素材标注 + 查证记录的 venue/year」，不根据 accept 状态改判预印本：
+    查证链路对个别已收录论文（如 UPSR）会误标 `preprint_only`，凭它降级会把
+    真的 CVPR 论文写成「arXiv 预印本」——这类判定要联网复核，不在卡片整理里做。
     """
-    names = [str(a).strip() for a in (authors or []) if str(a).strip()]
-    if not names:
+    if item is None:
         return ""
-    return "由 " + "、".join(names[:6]) + " 等研究人员共同完成"
+    _pub, venue, year = _venue_source(item)
+    if not venue:
+        haystack = f"{getattr(item, 'url', '')} {getattr(item, 'source', '')}"
+        # 没有权威 venue 就留空（整行省略）；「以原文标注为准」是占位废话，不许进信息卡
+        return "arXiv 预印本" if "arxiv" in haystack.lower() else ""
+    return venue_card_label(venue, year)
+
+
+def item_venue_short(item) -> str:
+    """标题里该出现的 venue 简称（「CVPR 2025」「PR 2026」）；预印本返回空串。"""
+    if item is None:
+        return ""
+    _pub, venue, year = _venue_source(item)
+    if not venue or is_preprint_venue(venue):
+        return ""
+    return venue_short_label(venue, year)
 
 
 def paper_meta_values(item) -> dict[str, str]:
     """从素材里取三行元数据的值；取不到的留空，由调用方跳过该行。"""
     if item is None:
         return {}
-    extra = getattr(item, "extra", None) or {}
-    pub = extra.get("publication") or {}
-    venue = str(pub.get("venue") or getattr(item, "venue", "") or "").strip()
-    if not venue:
-        haystack = f"{getattr(item, 'url', '')} {getattr(item, 'source', '')}".lower()
-        venue = "arXiv 预印本" if "arxiv" in haystack else "以原文标注为准"
     return {
         "论文名称": str(getattr(item, "title", "") or "").strip(),
-        "发表期刊/会议": venue_card_label(venue, getattr(item, "year", "") or ""),
+        "发表期刊/会议": item_venue_label(item),
         "作者团队": _authors_line(getattr(item, "authors", None)),
     }
 
@@ -1166,13 +1352,29 @@ def ensure_paper_meta_card(spec: dict, item) -> int:
             found[0] = canonical
             changed += 1
         truth = values.get(canonical) or ""
-        if truth and truth != "以原文标注为准" and str(found[1]).strip() != truth:
+        if (not truth and canonical == "作者团队"
+                and is_placeholder_authors(found[1])):
+            # 素材也拿不出人名：这一行连同模型写的废话一起删掉（宁缺毋滥）
+            rows.remove(found)
+            changed += 1
+            continue
+        if truth and str(found[1]).strip() != truth:
             found[1] = truth
             changed += 1
-    head = [r for canonical, _a in _PAPER_META_LABELS
-            for r in rows if _meta_kind(r[0]) == canonical][:len(_PAPER_META_LABELS)]
-    ordered = head + [r for r in rows if all(r is not h for h in head)]
-    if [id(r) for r in ordered] != [id(r) for r in rows]:
+    # 同一语义只留一行（「期刊/会议」与旧行名「发表状态」并存时，后者是重复废话），
+    # 三行必选项按固定顺序置顶，其余（研究机构 / 开源代码 / DOI）保持原序。
+    head: list[list] = []
+    seen_kinds: set[str] = set()
+    for canonical, _a in _PAPER_META_LABELS:
+        for r in rows:
+            if _meta_kind(r[0]) == canonical and canonical not in seen_kinds:
+                head.append(r)
+                seen_kinds.add(canonical)
+                break
+    rest = [r for r in rows
+            if all(r is not h for h in head) and _meta_kind(r[0]) not in seen_kinds]
+    ordered = head + rest
+    if len(ordered) != len(rows) or [id(r) for r in ordered] != [id(r) for r in rows]:
         changed += 1
     if changed:
         card["rows"] = ordered
@@ -1274,8 +1476,12 @@ def ensure_paper_arch_figure(spec: dict, item, figures: dict) -> int:
 def ensure_paper_result_table(spec: dict, item) -> int:
     """「关键实验结果解读」节必须有 table 块；模型漏写时按素材原表补一张。
 
-    只补素材里真实存在的表（数字可溯源），不做任何改写。返回补入的表数（0/1）。
+    只补素材里真实存在、且**本文方法有数**的表（数字可溯源，Ours 行不留白）：
+    表头写着 Ours、列里全空的错位表一律不进稿——那正是「Ours 一行全是 —」
+    事故的来源。返回补入的表数（0/1）。
     """
+    from .tables_guard import has_ours_data, usable_tables
+
     sections = spec.get("sections")
     if not isinstance(sections, list):
         return 0
@@ -1286,7 +1492,8 @@ def ensure_paper_result_table(spec: dict, item) -> int:
         return 0
     tables = [t for t in ((getattr(item, "extra", None) or {}).get("tables") or [])
               if isinstance(t, dict)]
-    if not tables:
+    tables = usable_tables(tables, item)
+    if not tables or not has_ours_data(tables, item):
         return 0
     table = compact_table(tables[0])
     header = table.get("header") or []
@@ -1297,8 +1504,12 @@ def ensure_paper_result_table(spec: dict, item) -> int:
     return 1
 
 
-def paper_asset_gaps(spec, figures) -> dict:
-    """成稿红线：核心创新节必须真有结构图，实验结果节必须真有对比表。"""
+def paper_asset_gaps(spec, figures, *, table_required: bool = True) -> dict:
+    """成稿红线：核心创新节必须真有结构图，实验结果节必须真有对比表。
+
+    table_required=False 用在「素材里根本没有一张本文方法有数的表」时：
+    此时正确的交付是文字说明 + 原文指路，不该为了凑表逼模型编一张。
+    """
     sections = spec.get("sections") if isinstance(spec, dict) else None
     if not isinstance(sections, list):
         return {"figure": True, "table": True}
@@ -1316,10 +1527,10 @@ def paper_asset_gaps(spec, figures) -> dict:
         _resolved_figure(b, figures) for b in sections[fig_start + 1:fig_end])
 
     tbl_start, tbl_end = _section_bounds(sections, ("实验结果", "实验与结果", "实验验证", "结果解读"))
-    table_gap = tbl_start < 0 or not any(
+    table_gap = table_required and (tbl_start < 0 or not any(
         isinstance(b, dict) and b.get("type") == "table"
         and _filled(b.get("header")) and _filled(b.get("rows"))
-        for b in sections[tbl_start + 1:tbl_end])
+        for b in sections[tbl_start + 1:tbl_end]))
 
     return {"figure": figure_gap, "table": table_gap}
 

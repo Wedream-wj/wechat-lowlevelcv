@@ -511,7 +511,9 @@ class TestPaperMetaCard(unittest.TestCase):
         self.assertIn("PR", card["rows"][1][1])
         authors = card["rows"][2][1]
         self.assertIn("Weihang Kong", authors)
-        self.assertIn("、", authors)
+        # 作者行只写具体人名、逗号分隔（「由 A、B 等研究人员共同完成」这类模板已废除）
+        self.assertIn(", ", authors)
+        self.assertNotIn("共同完成", authors)
         self.assertNotIn("来自", authors)
 
     def test_existing_card_rows_are_renamed_and_promoted(self):

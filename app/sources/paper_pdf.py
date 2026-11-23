@@ -1275,6 +1275,63 @@ def _rank_tables(tables: list[dict]) -> list[dict]:
         str(t.get("caption") or "")) else 1)
 
 
+def _dedupe_tables(tables: list[dict]) -> list[dict]:
+    """按表头 + 行内容去重，保留先到的（PDF 通道优先于 HTML 二次解析）。"""
+    out: list[dict] = []
+    seen: set[tuple] = set()
+    for t in tables or []:
+        if not isinstance(t, dict):
+            continue
+        key = (tuple(str(h) for h in t.get("header") or []),
+               tuple(tuple(str(c) for c in r) for r in t.get("rows") or []))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+    return out
+
+
+async def _ensure_ours_tables(client: HttpClient, item: Item, assets: dict,
+                             pdf_bytes: bytes, log) -> None:
+    """素材侧前置断言：至少一张表里「本文方法」有数值。
+
+    实测事故：HTML 表格的 rowspan/colspan 没展开时，表头还留着「+Ours」，
+    右侧整列数值却飞了——模型照抄就写出「+Ours | — | — | —」。这里在把表交给
+    模型之前先验一遍：缺 Ours 数值就二级降级（PDF 词坐标重建 → arXiv HTML →
+    官方仓库 README），穷尽仍无则标记素材缺口，成稿侧改文字说明，绝不留白。
+    """
+    from ..tables_guard import has_ours_data, usable_tables
+
+    tables = [t for t in (assets.get("tables") or []) if isinstance(t, dict)]
+    if has_ours_data(usable_tables(tables, item), item):
+        return
+    log("表格断言：素材表里没有本文方法（Ours）的数值，触发二级降级深度解析")
+    extra: list[dict] = []
+    if pdf_bytes:
+        try:
+            extra.extend(pdf_tables(pdf_bytes, limit=8))
+        except Exception:
+            pass
+    if not has_ours_data(usable_tables(extra, item), item):
+        try:
+            fb = await _arxiv_assets(client, item)
+            extra.extend(fb.get("tables") or [])
+        except Exception:
+            pass
+    if not extra:
+        try:
+            extra.extend(await _repo_tables(client, item))
+        except Exception:
+            pass
+    merged = _dedupe_tables(tables + extra)
+    assets["tables"] = merged
+    if has_ours_data(usable_tables(merged, item), item):
+        log(f"表格断言：二级解析已补齐本文方法数值（候选 {len(merged)} 张）")
+    else:
+        item.extra["ours_table_missing"] = True
+        log("素材红线：多源解析后仍无本文方法数值 → 成稿撤表改文字，绝不留白")
+
+
 def _result_sentences(text: str, limit: int = 10) -> list[str]:
     """全文里带数字的结论句（PDF 兜底口径：与 JATS 的 snippets 同款筛选）。"""
     sentences: list[str] = []
@@ -1660,6 +1717,9 @@ async def enrich_target(client: HttpClient, item: Item, *, pdf_bytes: bytes = b"
         if repo_tables:
             assets["tables"] = repo_tables
             log(f"素材兜底：表格已由官方仓库 README 补齐（{len(repo_tables)} 张）")
+    # 前置断言（Ours 零留白）：表可以有残缺的次要列，但本文方法那一行/列必须有数；
+    # 缺了就二级降级重解析，仍缺则标记素材缺口，由成稿侧撤表改文字。
+    await _ensure_ours_tables(client, item, assets, pdf_bytes, log)
     if assets["tables"]:
         assets["tables"] = _rank_tables(assets["tables"])
     summary["figures"] = len(figures)

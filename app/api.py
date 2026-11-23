@@ -286,7 +286,8 @@ async def markdown(issue_id: str) -> Response:
 async def delete_issue(issue_id: str, request: Request) -> dict:
     """删除本地草稿：数据库记录 + 本地三个产物文件（md / html / preview）。
 
-    封面图按「模块+日期」命名、可能被同天多期复用，不在此清理。
+    封面图带「成稿标题指纹」唯一命名（见 cover_guard.cover_filename），不再被
+    同天多期复用；但存量旧封面仍可能是共享文件，为免误删仍不在此清理。
     已推送进微信草稿箱的内容不受影响——这里只管本地。
     """
     _check_admin(request)

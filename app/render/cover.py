@@ -16,6 +16,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 from ..config import settings, topics
+from . import cover_guard
 from .cn_words import is_word, segment_cjk
 
 # 2.35:1：与微信大图封面一致
@@ -75,6 +76,11 @@ _NUM_JOINERS = set("+×÷*/%=:：~")
 # 注意别把「把/被/在/从」这类介词放进来——它们向右管辖，做行首完全成立
 # （「…步扩散 / 把超分推到 2K 以上」就是标准的中文标题断法）。
 _BAD_LINE_START = set("的了吗呢吧啊嘛呀与和或及而就还都很更最、。，；：？！）》」』”…—·")
+# 中文排版硬禁则：标点绝不能出现在行首。DP 为不溢出会把「：」挤到下一行行首
+# （实测「CVPR 2025 | VideoGigaGAN」/「：流引导…」）——这些标点很窄，挂到上一行
+# 行尾即便略出界也远好于行首错位。注意只收纯标点，不收「的/了/与」这类虚词汉字：
+# 它们挪到行尾会变成「吊着半个词」，比行首更难看。
+_HANGABLE_PUNCT = frozenset("、。，；：？！）》」』”…—·,.;:?!)]}")
 # 数字后面的量词/单位：断在它们之后，等于把「16 步扩散」的修饰关系切断
 _MEASURE_WORDS = set("步倍张帧秒个种次层级维组项块条支台片路篇轮遍")
 # 这些单字只向右管辖（介词/单字动词），留在行尾等于把一个短语吊在半空
@@ -225,6 +231,24 @@ def _break_penalty(units: list[str], j: int) -> float:
     return pen
 
 
+def _hang_punctuation(lines: list[str]) -> list[str]:
+    """行首标点吸附（中文排版禁则 / kinsoku shori）。
+
+    折行结果里若某行以标点开头（「：」「，」「」」等），把它挪到上一行行尾——
+    标点只向左吸附，挂在行尾是标准中文排版允许的（允许略微出界），而留在行首
+    属于「标点错位」，读者第一眼就觉得排版坏了。DP 的软惩罚不足以兜住这种情况：
+    标题前半段恰好占满行宽时，为了两行均衡它会把标点甩到下一行行首。
+    """
+    out = [ln for ln in lines if ln]
+    for i in range(1, len(out)):
+        while out[i] and out[i][0] in _HANGABLE_PUNCT:
+            if not out[i - 1]:
+                break
+            out[i - 1] += out[i][0]
+            out[i] = out[i][1:]
+    return [ln for ln in out if ln]
+
+
 def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int, max_lines: int = 3) -> list[str]:
     """按像素宽度折行：ASCII 词不劈开、标点后优先断、中文断点走 DP 均衡。
 
@@ -288,6 +312,8 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_width: int, max_lines:
         lines = ["".join(units[bounds[t]:bounds[t + 1]]).strip()
                  for t in range(len(bounds) - 1)]
         lines = [ln for ln in lines if ln]
+    # 行首标点吸附：DP 的软惩罚拦不住「标点被挤到下一行行首」，这里做硬兜底
+    lines = _hang_punctuation(lines) or lines
     # 溢出兜底：末行超宽时用省略号收尾
     if draw.textlength(lines[-1], font=font) > max_width:
         while lines[-1] and draw.textlength(lines[-1] + "…", font=font) > max_width:
@@ -589,8 +615,10 @@ def make_cover(spec: dict, module: str, date_str: str | None = None,
               font=_font(16, False), fill=(168, 178, 198))
 
     suffix = ".jpg" if photo is not None else ".png"
+    # 默认文件名带「成稿标题指纹」：同日多篇绝不共用路径（VideoGigaGAN 被
+    # SR4IR 覆盖的事故）。显式传 out_path 时尊重调用方（verify / 定向修复）。
     out = Path(out_path) if out_path else \
-        settings.image_dir / f"cover_{module}_{date_str.replace('.', '')}{suffix}"
+        settings.image_dir / cover_guard.cover_filename(module, date_str, spec, suffix)
     out.parent.mkdir(parents=True, exist_ok=True)
     if suffix == ".jpg":
         img.save(out, format="JPEG", quality=90, optimize=True, progressive=True)

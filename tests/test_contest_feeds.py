@@ -95,11 +95,14 @@ class TestMlContests(unittest.TestCase):
     )
 
     def test_parse_and_drop_expired(self):
-        # 夹具里全是 &quot;，不能用 str.format（会把它们当占位符），改用 token 替换
-        future = (datetime.now() + timedelta(days=40)).year
-        items = cf.parse_mlcontests(self.HTML.replace("__FUTURE__", str(future)))
+        # 夹具里全是 &quot;，不能用 str.format（会把它们当占位符），改用 token 替换。
+        # 截止日期必须**相对今天**算：写死「15 Nov」的夹具会在 11-16 当天变成过期，
+        # 把一条本该通过的时间敏感用例变成定时炸弹。
+        target = datetime.now() + timedelta(days=40)
+        future = f"{target.day:02d} {target.strftime('%b')} {target.year}"
+        items = cf.parse_mlcontests(self.HTML.replace("15 Nov __FUTURE__", future))
         self.assertEqual([i.title for i in items], ["LLM Inference Sprint"])
-        self.assertIn(str(future), items[0].extra["deadline"])
+        self.assertIn(str(target.year), items[0].extra["deadline"])
         self.assertEqual(items[0].extra["prize"], "$10,000")
 
 

@@ -212,6 +212,111 @@ def pick_figures_from_html(html: str, base_url: str) -> tuple[str, str, str, str
     return arch[1], arch[2], res[1], res[2]
 
 
+def _html_grid(tbl) -> list[list[str]]:
+    """把 <table> 展开成矩形网格：rowspan / colspan 逐格填满（被占位的格继承文本）。
+
+    LaTeXML 的实验对比表用 rowspan 表示 Benchmark（Set5 跨 4 行）、用两行 thead
+    表示分组表头。按 <tr> 直接取 <td> 会漏掉被 rowspan 占位的格，整张表向左挤，
+    右半边的数值全部落到空列——2026-11-16 SFD 稿「+Ours 整行 —」的直接根因。
+    展开后每个方法列都能拿到自己那一列的真实数值。
+    """
+    trs = [tr for tr in tbl.find_all("tr")
+           if tr.find_all(["td", "th"], recursive=False)]
+    grid: list[list[str]] = []
+    pending: dict[tuple[int, int], str] = {}   # (行, 列) → 被 rowspan 占位的文本
+    for ri, tr in enumerate(trs):
+        row: list[str] = []
+        ci = 0
+        for cell in tr.find_all(["td", "th"], recursive=False):
+            while (ri, ci) in pending:          # 先补上一行下来的 rowspan 占位
+                row.append(pending.pop((ri, ci)))
+                ci += 1
+            text = _clean_cell(cell.get_text(" ", strip=True))
+            try:
+                colspan = max(1, int(cell.get("colspan") or 1))
+            except (TypeError, ValueError):
+                colspan = 1
+            try:
+                rowspan = max(1, int(cell.get("rowspan") or 1))
+            except (TypeError, ValueError):
+                rowspan = 1
+            for k in range(colspan):
+                row.append(text)
+                for rr in range(1, rowspan):
+                    pending[(ri + rr, ci + k)] = text
+            ci += colspan
+        while (ri, ci) in pending:              # 行尾仍有占位（跨列 + 跨行叠加）
+            row.append(pending.pop((ri, ci)))
+            ci += 1
+        grid.append(row)
+    width = max((len(r) for r in grid), default=0)
+    return [r + [""] * (width - len(r)) for r in grid]
+
+
+def _fold_header(rows: list[list[str]]) -> list[str]:
+    """多行表头折叠成单行：「RankSR」+「GAN [79]」→「RankSR GAN [79]」。"""
+    width = max((len(r) for r in rows), default=0)
+    header: list[str] = []
+    for j in range(width):
+        parts: list[str] = []
+        for row in rows:
+            value = str(row[j] if j < len(row) else "").strip()
+            if value and value not in parts:    # rowspan 会让同一文本重复出现
+                parts.append(value)
+        header.append(" ".join(parts).strip())
+    return header
+
+
+_CELL_NUM_RE = re.compile(
+    r"^\s*[~≈<>≤≥]?\s*[-+]?\d[\d,]*(?:\.\d+)?(?:\s*±\s*\d+(?:\.\d+)?)?\s*%?\s*$")
+
+
+def _is_data_row(cells: list[str]) -> bool:
+    """数据行：至少两个数值格，且数值格不少于已填格的一半。"""
+    filled = [c for c in cells if str(c).strip()]
+    nums = sum(1 for c in filled if _CELL_NUM_RE.match(c))
+    return len(filled) >= 2 and nums >= 2 and nums * 2 >= len(filled)
+
+
+def _header_rows(grid: list[list[str]], max_head: int = 3) -> int:
+    """表头有几行：第一行数值型数据行之前的所有行。
+
+    LaTeXML 的表头不一定包在 <thead> 里（SFD 的 IQA 表两行表头就躺在 tbody），
+    只按 thead 数行会把表头当数据行、整张表错位。按「有没有数值」判定更稳。
+    """
+    for i, row in enumerate(grid[:max_head]):
+        if _is_data_row(row):
+            return i
+    return 1
+
+
+def _merge_benchmark_metric(header: list[str], rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    """首两列是 Benchmark / Metric 时并成一列「Set5 PSNR ↑」。
+
+    拆成两列时，续行（SSIM / LPIPS）的基准名是空的，模型很容易把行对齐错；
+    合并后每行自带「基准 + 指标」，回填与压缩都只认一列标签。
+    """
+    if len(header) < 3:
+        return header, rows
+    first, second = header[0].strip().lower(), header[1].strip().lower()
+    metric_words = ("metric", "metrics", "指标", "measures")
+    if second not in metric_words or "psnr" in first or "ssim" in first:
+        return header, rows
+    if any(re.search(r"psnr|ssim|lpips|dists", h.lower()) for h in header[:2]):
+        return header, rows
+    merged_header = [f"{header[0].strip()} {header[1].strip()}".strip()] + header[2:]
+    merged_rows: list[list[str]] = []
+    bench = ""
+    for row in rows:
+        label = " ".join(c for c in row[:2] if c and c.strip())
+        if row and row[0].strip():
+            bench = row[0].strip()
+        elif bench:
+            label = f"{bench} {row[1].strip()}".strip() if len(row) > 1 else bench
+        merged_rows.append([label] + row[2:])
+    return merged_header, merged_rows
+
+
 def extract_tables(html: str, limit: int = 3, max_cols: int = 9) -> list[dict]:
     """从 HTML 版论文里抽「实验指标对比表」，返回 [{header, rows, caption}]。
 
@@ -222,8 +327,13 @@ def extract_tables(html: str, limit: int = 3, max_cols: int = 9) -> list[dict]:
     Ours 列认不出时（表头只写方法名）用标题首词兜底，仍认不出就取最右列。
     单元格与表注都过 _clean_cell / _clean_caption 清洗 LaTeXML 残留。
 
+    网格化是硬前提：先按 colspan/rowspan 展开成矩形，再折叠多行表头、
+    合并 Benchmark/Metric 两列。表头写着 Ours 但整列没数（解析错位的典型
+    形态）时整张丢弃——这种表喂给模型，它只会照抄出一行「+Ours | — | —」。
     """
     from bs4 import BeautifulSoup
+
+    from ..tables_guard import ours_gap
 
     soup = BeautifulSoup(html, "lxml")
     hint = _method_hint(soup)
@@ -236,20 +346,18 @@ def extract_tables(html: str, limit: int = 3, max_cols: int = 9) -> list[dict]:
         cap_node = wrapper.select_one("figcaption") if wrapper else tbl.find_previous("figcaption")
         caption = _clean_caption(cap_node.get_text(" ", strip=True)) if cap_node else ""
 
-        head_cells = [_clean_cell(th.get_text(" ", strip=True)) for th in tbl.select("thead th")]
-        body_trs = tbl.select("tbody tr")
-        if not body_trs:  # 无 tbody 的裸表
-            body_trs = [tr for tr in tbl.select("tr") if not tr.find_parent("thead")]
-        body_rows: list[list[str]] = []
-        for tr in body_trs:
-            cells = [_clean_cell(c.get_text(" ", strip=True))
-                     for c in tr.find_all(["td", "th"], recursive=False)]
-            if len(cells) >= 2 and sum(1 for c in cells if c) >= 2:
-                body_rows.append(cells)
-        if not head_cells and body_rows:
-            head_cells, body_rows = body_rows[0][:], body_rows[1:]
-        if not head_cells or len(body_rows) < 2:
+        grid = _html_grid(tbl)
+        if len(grid) < 3:
             continue
+        n_head = _header_rows(grid)
+        if n_head >= len(grid):
+            continue
+        head_cells = _fold_header(grid[:n_head]) if n_head else [""] * len(grid[0])
+        body_rows = [r for r in grid[n_head:]
+                     if len(r) >= 2 and sum(1 for c in r if c) >= 2]
+        if len(body_rows) < 2:
+            continue
+        head_cells, body_rows = _merge_benchmark_metric(head_cells, body_rows)
 
         blob = " ".join(head_cells) + " " + " ".join(" ".join(r) for r in body_rows)
         has_metric = bool(_METRIC_RE.search(blob))
@@ -257,6 +365,10 @@ def extract_tables(html: str, limit: int = 3, max_cols: int = 9) -> list[dict]:
             _is_ours_header(h, hint) for h in head_cells
         )
         if not (has_metric or has_ours):
+            continue
+        # 解析错位自检：表头认出了本文方法列，列里却一个数都没有 → 整张丢弃
+        gap = ours_gap(head_cells, body_rows)
+        if gap and gap["kind"] == "blank_col":
             continue
 
         # 超宽表裁列：保首列（指标名/方法名）+ Ours 列，再从右往左补到 max_cols

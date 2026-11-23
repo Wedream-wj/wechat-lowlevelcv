@@ -15,6 +15,10 @@ TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
+<!-- 预览页可能引用外链图（微信 mmbiz.qpic.cn / CSDN 图床）。微信图床带 Referer
+     访问会回「此图片来自微信公众平台 未经允许不可引用」的占位图（实测 2KB，
+     无 Referer 才是真图），所以统一去掉 Referer。 -->
+<meta name="referrer" content="no-referrer" />
 <title>{title} · 预览</title>
 <style>
   :root {{ --ink:#1B1D22; --sub:#6B7280; --line:#E6E8EE; --primary:{primary}; }}

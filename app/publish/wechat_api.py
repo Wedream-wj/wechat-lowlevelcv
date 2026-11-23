@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 
-from ..config import settings
+from ..config import ROOT, settings
 from ..imaging import (
     CONTENT_IMAGE_MAX_BYTES,
     MATERIAL_IMAGE_MAX_BYTES,
@@ -208,6 +208,24 @@ class WeChatClient:
         return media_id
 
     # ------------------------------------------------------------- draft
+    def _resolve_local(self, src: str) -> Path | None:
+        """把成稿里的相对图片路径解析成本地文件。
+
+        路径可能相对两个根：主流水线的 figures 存 `out/` 下（out-相对）；
+        定向导入稿（如 articles/jensen-return.md）把 `figures/...` 相对
+        articles 目录引用。只认 out 根会让这类稿在推送时 `path.exists()`
+        落空、src 原样进微信 —— 草稿箱里全是裂图（2026-11-24 黄仁勋稿事故）。
+        依次回退：out 根 → 项目根 → articles 根；绝对路径直接用。
+        """
+        path = Path(src)
+        if path.is_absolute():
+            return path if path.exists() else None
+        for root in (settings.out_dir, ROOT, ROOT / "articles"):
+            cand = root / src
+            if cand.exists():
+                return cand
+        return None
+
     async def rewrite_images(self, html: str) -> str:
         """把本地图片 src 换成微信 CDN URL（同一张图只传一次）。"""
         mapping: dict[str, str] = {}
@@ -220,11 +238,8 @@ class WeChatClient:
             if src.startswith(("http://", "https://", "data:")):
                 parts.append(m.group(0))
             else:
-                path = Path(src)
-                if not path.is_absolute():
-                    # 成稿里的图片路径统一相对 out/ 目录
-                    path = settings.out_dir / src
-                if not path.exists():
+                path = self._resolve_local(src)
+                if path is None:
                     parts.append(m.group(0))
                 else:
                     if src not in mapping:

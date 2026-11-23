@@ -140,5 +140,72 @@ class TestUploadPath(unittest.TestCase):
         self.assertIn("jpg/png", ERRCODE_HINTS[40005])
 
 
+class TestResolveLocal(unittest.TestCase):
+    """推送前相对路径的多根回退解析（2026-11-24 黄仁勋稿裂图事故）。
+
+    主流水线的 figures 存 out/ 下，定向导入稿却相对 articles/ 目录引用
+    `figures/...`。旧实现只认 out 根，解析落空时 src 原样进微信草稿，
+    正文图片全部裂图。回退顺序：out 根 → 项目根 → articles 根。
+    """
+
+    def _resolve(self, src: str, tmp: Path):
+        from unittest.mock import patch
+
+        out = tmp / "out"
+        (out / "assets").mkdir(parents=True, exist_ok=True)
+        with patch("app.publish.wechat_api.settings") as fake_settings, \
+                patch("app.publish.wechat_api.ROOT", tmp):
+            fake_settings.out_dir = out
+            client = WeChatClient()
+            try:
+                return client._resolve_local(src)
+            finally:
+                import asyncio
+
+                asyncio.run(client._client.aclose())
+
+    def test_out_root_first(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "out" / "figures").mkdir(parents=True)
+            (root / "out" / "figures" / "a.png").write_bytes(b"x")
+            hit = self._resolve("figures/a.png", root)
+            self.assertIsNotNone(hit)
+            self.assertEqual(Path(hit), root / "out" / "figures" / "a.png")
+
+    def test_articles_root_fallback(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "articles" / "figures").mkdir(parents=True)
+            (root / "articles" / "figures" / "fig01.png").write_bytes(b"x")
+            hit = self._resolve("figures/fig01.png", root)
+            self.assertIsNotNone(hit)
+            self.assertEqual(Path(hit), root / "articles" / "figures" / "fig01.png")
+
+    def test_missing_returns_none(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self._resolve("figures/ghost.png", Path(tmp)))
+
+    def test_absolute_existing_path(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "abs.png"
+            p.write_bytes(b"x")
+            self.assertEqual(Path(self._resolve(str(p), Path(tmp))), p)
+
+    def test_absolute_missing_path(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(self._resolve(str(Path(tmp) / "ghost.png"), Path(tmp)))
+
+
 if __name__ == "__main__":
     unittest.main()
