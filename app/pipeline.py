@@ -15,11 +15,15 @@ from pathlib import Path
 from typing import Callable
 
 from . import db
-from .config import settings, topics
+from .config import ROOT, settings, topics
 from .filters import events as event_dedupe
 from .filters import grounding as paper_grounding
 from .filters import recency
 from .filters import scoring
+# 模块名本身也要绑定：paper 素材缺 Ours 数值的前置指令分支按
+# prompts.OURS_MISSING_NOTE 取常量，只做 `from .llm.prompts import (...)`
+# 符号导入时 `prompts` 这个名字并不存在，会在「生成一期」抛 NameError。
+from .llm import prompts
 from .llm.client import LLMClient, LLMError
 from .llm.prompts import (
     INDUSTRY_FACT_RETRY,
@@ -1084,6 +1088,12 @@ async def run_module(module: str, *, publish: bool | None = None,
         # 复用 / 预览 / 推送前用 verify_ownership 复核，杜绝跨篇串图。
         cover_guard.write_ownership(cover_path, spec, pick, cover_check.identity,
                                     issue_id=issue_id)
+        # 全模块硬约束留痕：新生成的封面必须是本期独占路径（指纹命名保证），
+        # 万一撞上存量共享文件，日志立即报因，推草稿时 assert_cover_exclusive 硬拦。
+        exclusive = cover_guard.assert_cover_exclusive(
+            cover_path, issue_id, db.cover_owners())
+        if not exclusive.ok:
+            _log(f"封面唯一性告警：{exclusive.reason}")
 
         preview = render_preview(
             spec,
@@ -1144,12 +1154,21 @@ async def push_issue(issue_id: str, *, attrs: "PublishAttrs | None" = None) -> A
     if not article:
         raise PipelineError(f"找不到期号 {issue_id}")
 
-    # 【封面图与正文 100% 强一致】推送前归属复核：封面 sidecar 若标明属于
-    # 另一篇文章（同日多期覆盖事故），宁可拒推也不把张冠李戴的图发到微信端。
+    # 【封面图与正文 100% 强一致】推送前三道硬闸门（论文/业界/赛事一视同仁）：
+    #   ① 归属复核  —— sidecar 标明属于别篇 → 拒推（微信端不可逆）；
+    #   ② 唯一性    —— 同一封面被多期共用 → 拒推（2026-11-26 存量事故直因）；
+    #   ③ 资产有效性 —— 文件缺失/损坏/尺寸不足 → 拒推（草稿箱裂图与占位图）。
     if article.cover_path:
         owned = cover_guard.verify_ownership(article.cover_path, {"title": article.title})
         if not owned.ok:
             raise PipelineError(f"封面一致性闸门：{owned.reason}；请重新生成封面后再推草稿")
+        exclusive = cover_guard.assert_cover_exclusive(
+            article.cover_path, issue_id, db.cover_owners())
+        if not exclusive.ok:
+            raise PipelineError(f"封面一致性闸门：{exclusive.reason}")
+        asset = cover_guard.verify_cover_asset(article.cover_path, root=ROOT)
+        if not asset.ok:
+            raise PipelineError(f"封面一致性闸门：{asset.reason}；请重新生成封面后再推草稿")
 
     attrs = attrs or PublishAttrs.from_settings()
 

@@ -205,10 +205,15 @@ class TestPushUsesLatestEdit(unittest.TestCase):
         settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         settings.out_dir.mkdir(parents=True, exist_ok=True)
         db.init_db()
+        # 推送链路的「封面资产有效性」闸门要求封面真实存在且尺寸合规；
+        # 造一张 1080×460 的占位 PNG，让夹具聚焦「推送取最新版 + 发布属性」本身。
+        from PIL import Image
+        cover = root / "out" / "cover.png"
+        Image.new("RGB", (1080, 460), (16, 24, 48)).save(cover)
         self.article = Article(
             module="paper", title="原标题", markdown=_md(),
             html=wechat.render_body(SPEC, FIGURES, "paper"),
-            cover_path="cover.png",
+            cover_path=str(cover),
             items=[Item(module="paper", title="t", url="https://doi.org/x", source="crossref")],
             issue_id="paper-test-2", status="rendered",
         )

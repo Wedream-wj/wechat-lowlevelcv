@@ -391,6 +391,46 @@ async def issue_save_content(issue_id: str, request: Request) -> dict:
     return payload
 
 
+@app.get("/api/covers/audit")
+async def covers_audit() -> dict:
+    """全模块「封面图与正文 100% 强一致」审计（只读，不改任何稿）。
+
+    三类问题一次列清：① 同一封面被多篇稿共用（跨期串图，存量事故直因）；
+    ② 封面文件缺失 / 损坏 / 尺寸不足（无效链接，草稿箱会裂图）；
+    ③ sidecar 归属标题与当前稿不符。运营可据此按
+    `python -m scripts.fix_shared_covers --audit` 逐篇生成专属封面。
+    """
+    from .config import ROOT
+    from .render import cover_guard
+
+    owners = db.cover_owners()
+    groups: dict[str, list[dict]] = {}
+    for iid, title, path in owners:
+        key = str(path or "").strip().replace("\\", "/").lower()
+        groups.setdefault(key, []).append(
+            {"issue_id": iid, "title": title, "cover_path": path})
+
+    shared = [{"cover_path": items[0]["cover_path"], "count": len(items), "issues": items}
+              for items in groups.values() if len(items) > 1]
+    broken, mismatch = [], []
+    for iid, title, path in owners:
+        asset = cover_guard.verify_cover_asset(path, root=ROOT)
+        if not asset.ok:
+            broken.append({"issue_id": iid, "title": title, "reason": asset.reason})
+        owned = cover_guard.verify_ownership(path, {"title": title})
+        if not owned.ok:
+            mismatch.append({"issue_id": iid, "title": title, "reason": owned.reason})
+    return {
+        "modules": list(cover_guard.COVER_MODULES),
+        "total_covers": len(owners),
+        "shared_groups": len(shared),
+        "shared": sorted(shared, key=lambda x: -x["count"]),
+        "broken": broken,
+        "ownership_mismatch": mismatch,
+        "healthy": not shared and not broken and not mismatch,
+    }
+
+
 @app.get("/api/wechat/check")
 async def wechat_check() -> dict:
     """微信连接体检：验证配置 → 凭据/白名单 → 草稿箱权限，不产生任何草稿。"""

@@ -95,6 +95,12 @@ _NO_BREAK_BIGRAMS = frozenset((
     "算法", "特征", "重建", "生成", "损失", "精度", "效率", "参数", "结构", "模块",
     "采样", "噪声", "真实", "场景", "基准", "指标", "性能", "实验", "方法", "结果",
     "视觉", "底层", "质量", "变换", "编码", "解码", "注意", "计算", "退化", "增强",
+    # 产业 / 人事类常见双字词：2026-11-25 黄仁勋「工程师回归」专题里
+    # 「为黄仁勋辞 | 职的工程师」把「辞职」劈成两行，补进词表后断点自然
+    # 退到「辞职的 | 工程师」。中文标题没有空格分词，这类词只能显式登记。
+    "辞职", "离职", "回归", "考虑", "仓促", "董事", "员工", "股权",
+    "市值", "股价", "调查", "治理", "公告", "创始", "工程", "程师",
+    "英伟", "伟达", "机器", "具身",
 ))
 
 
@@ -122,6 +128,34 @@ def _fuse_numeric(units: list[str]) -> list[str]:
     return out
 
 
+def _fuse_model_alias(units: list[str]) -> list[str]:
+    """把「型号 + 空格 + 名称」熔成一个原子：GPT-6 Astra / Qwen3.8 27B。
+
+    事故（2026-11-28「权重空间编程」专题）：封面把「GPT-6 Astra」从空格处
+    劈成「…MIT 让 GPT-6 / Astra 直接改写…」，型号与别名被拆成两行，读者
+    第一眼会以为是两款模型。规则只焊死「带数字或连字符的 ASCII 型号 +
+    单个空格 + ASCII 纯字母别名」这一种组合：
+      - 纯字母词（MIT / CVPR / NTIRE）不触发，避免把「CVPR 2025 | …」焊死；
+      - 后面跟中文（Real-IISR 用 / Qwen3.5-0.8B 权重）不触发，中文仍可自然断；
+    实测 5 个真实历史标题断行零变化。
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(units):
+        u = units[i]
+        if (u and u[0].isascii() and any(c.isdigit() or c == "-" for c in u)
+                and i + 2 < len(units)
+                and units[i + 1] == " "
+                and units[i + 2] and units[i + 2].isascii()
+                and units[i + 2].isalpha()):
+            out.append(u + " " + units[i + 2])
+            i += 3
+            continue
+        out.append(u)
+        i += 1
+    return out
+
+
 def _units(text: str) -> list[str]:
     """把标题切成不可劈开的原子单元。
 
@@ -129,7 +163,8 @@ def _units(text: str) -> list[str]:
       是单个原子，DP 再也切不到词中间；
     - ASCII 词（含 .-'_ 连字）整体原子，`Real-IISR` / `PSNR` 不会被劈开；
     - 标点、空格各自成原子，作为天然断点；
-    - 最后把「数字 + 运算符 + 数字」熔成一个原子（1+16 / 2×4）。
+    - 熔合「数字 + 运算符 + 数字」（1+16 / 2×4）；
+    - 熔合「型号 + 空格 + 别名」（GPT-6 Astra），型号绝不跨行。
     """
     out: list[str] = []
     cjk: list[str] = []
@@ -157,7 +192,7 @@ def _units(text: str) -> list[str]:
             out.append(ch)
             i += 1
     flush_cjk()
-    return _fuse_numeric(out)
+    return _fuse_model_alias(_fuse_numeric(out))
 
 
 _HARD_BREAK = 1e9          # 硬禁断点：数字与其量词之间，任何折行方案都不许碰

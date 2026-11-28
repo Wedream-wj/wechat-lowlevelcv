@@ -230,6 +230,20 @@ def is_used(item: Item) -> bool:
 
 
 # ---------------------------------------------------------------- issues
+def cover_owners() -> list[tuple[str, str, str]]:
+    """全库封面归属快照 [(issue_id, title, cover_path)]。
+
+    供 `cover_guard.assert_cover_exclusive` 做「一个封面只属于一篇稿」的全模块
+    唯一性校验，也是 `/api/covers/audit` 存量共扫的数据源。只读，不改动任何稿。
+    """
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT issue_id, title, cover_path FROM issues "
+            "WHERE cover_path IS NOT NULL AND cover_path != ''"
+        ).fetchall()
+    return [(r["issue_id"], r["title"] or "", r["cover_path"] or "") for r in rows]
+
+
 def save_article(article: Article) -> str:
     if not article.issue_id:
         article.issue_id = f"{article.module}-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
